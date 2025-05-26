@@ -1,0 +1,9 @@
+python-binance
+ta
+pandas
+scikit-learn
+xgboost
+lightgbm
+joblib
+tensorflow
+matplotlib

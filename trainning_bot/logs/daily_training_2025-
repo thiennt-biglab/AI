@@ -1,0 +1,39 @@
+🕒 Training started at Sat 05/24/2025  6:00:01.86  0-Sa.log
+Traceback (most recent call last):
+  File "D:\Project\trainning_bot\model\train_dqn.py", line 93, in <module>
+    train()
+    ~~~~~^^
+  File "D:\Project\trainning_bot\model\train_dqn.py", line 44, in train
+    print("\U0001f4e6 Loading existing model...")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python313\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\U0001f4e6' in position 0: character maps to <undefined>
+✅ Training finished at Sat 05/24/2025  6:00:13.98  0-Sa.log
+🕒 Training started at Sun 05/25/2025  6:00:02.21  0-Su.log
+Traceback (most recent call last):
+  File "D:\Project\trainning_bot\model\train_dqn.py", line 93, in <module>
+    train()
+    ~~~~~^^
+  File "D:\Project\trainning_bot\model\train_dqn.py", line 44, in train
+    print("\U0001f4e6 Loading existing model...")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python313\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\U0001f4e6' in position 0: character maps to <undefined>
+✅ Training finished at Sun 05/25/2025  6:00:17.67  0-Su.log
+🕒 Training started at Mon 05/26/2025  6:00:01.92  0-Mo.log
+Traceback (most recent call last):
+  File "D:\Project\trainning_bot\model\train_dqn.py", line 93, in <module>
+    train()
+    ~~~~~^^
+  File "D:\Project\trainning_bot\model\train_dqn.py", line 44, in train
+    print("\U0001f4e6 Loading existing model...")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python313\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\U0001f4e6' in position 0: character maps to <undefined>
+✅ Training finished at Mon 05/26/2025  6:00:17.54  0-Mo.log

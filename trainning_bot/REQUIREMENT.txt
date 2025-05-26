@@ -1,0 +1,11 @@
+ccxt
+pandas
+feedparser
+vaderSentiment
+tweepy
+ta
+stable-baselines3[extra]
+gym
+shimmy
+sb3-contrib
+python-binance
