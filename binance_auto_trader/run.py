@@ -45,6 +45,8 @@ while True:
             balance = get_balance()
             profit_ratio = pnl / balance if balance else 0
 
+            print(f"[INFO] Current position: {current_position} | PnL: {pnl:.2f} | Balance: {balance:.2f} | Profit Ratio: {profit_ratio*100:.2f}%")
+            # Kiểm tra TP/SL
             if profit_ratio >= TAKE_PROFIT_RATIO:
                 close_position(SYMBOL, current_position)
                 print(f"[AUTO-PROFIT] Closed {current_position} with profit {profit_ratio*100:.2f}% (TP {TAKE_PROFIT_RATIO*100:.2f}%)")
@@ -59,6 +61,7 @@ while True:
                 print(f"[INFO] Profit {profit_ratio*100:.2f}% (TP {TAKE_PROFIT_RATIO*100:.2f}%, SL {LOSS_CUTOFF_RATIO*100:.2f}%) → Hold")
 
         # === XỬ LÝ GIAO DỊCH MỚI ===
+        print(f"[INFO] Action: {action} | Confidence: {confidence:.2f} | Price: {price:.4f}")
         if action != 'HOLD':
             balance = get_balance()
             init_leverage = select_leverage(confidence)

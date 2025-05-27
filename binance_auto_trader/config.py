@@ -15,12 +15,19 @@ SWITCH_THRESHOLD = 0.80
 ENTRY_THRESHOLD = 0.70
 
 NEWS_API_KEY = "b4dc4b3d6c7c4fd6bd0440b3ea507937"  # replace with your key
-QUERY = "crypto OR bitcoin OR ethereum OR war OR inflation OR fed OR elon musk OR trump"
+QUERY = "crypto OR bitcoin OR ethereum OR fed OR inflation OR binance OR usdt OR usdc OR recession OR war OR conflict OR missile OR Elon Musk OR Powell OR Vitalik OR CZ OR ETF"
 
 KEYWORDS = {
-    "war": ["war", "conflict", "missile", "Russia", "Ukraine", "Israel", "Palestine", "Iran"],
-    "economy": ["interest rate", "inflation", "Fed", "ECB", "IMF", "regulation", "ban", "economic policy"],
-    "influencers": ["Elon Musk", "Powell", "CZ", "Vitalik", "Gensler", "Trump", "ETF"]
+    "FED": ["fed", "federal reserve", "interest rate", "rate hike", "rate cut", "jerome powell"],
+    "Crisis": ["crash", "collapse", "liquidation", "bankruptcy", "exploit", "hack", "shutdown"],
+    "Recession": ["recession", "unemployment", "inflation", "economic slowdown", "default", "layoff"],
+    "Binance": ["binance", "cz", "binance us", "binance smart chain"],
+    "Bitcoin": ["bitcoin", "btc", "satoshi"],
+    "Ethereum": ["ethereum", "eth", "vitalik"],
+    "Altcoin": ["altcoin", "dogecoin", "solana", "cardano", "polygon", "avax", "shiba"],
+    "War": ["war", "conflict", "missile", "russia", "ukraine", "israel", "palestine", "iran"],
+    "Economy": ["interest rate", "inflation", "fed", "ecb", "imf", "regulation", "ban", "economic policy"],
+    "Influencers": ["elon musk", "powell", "cz", "vitalik", "gensler", "trump", "etf"]
 }
 
 NEWS_URL = "https://newsapi.org/v2/everything"

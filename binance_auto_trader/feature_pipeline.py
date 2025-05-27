@@ -3,6 +3,7 @@ import pandas as pd
 import ta
 import requests
 import yfinance as yf
+import numpy as np
 from config import API_KEY, API_SECRET, SYMBOL, INTERVALS
 from news_sentiment import analyze_news
 from trader import safe_api_call
@@ -85,6 +86,22 @@ def fetch_features_multi_timeframe():
             df['mom'] = ta.momentum.ROCIndicator(df['close']).roc()
             bb = ta.volatility.BollingerBands(df['close'])
             df['bb_width'] = bb.bollinger_hband() - bb.bollinger_lband()
+            # Volume-based features
+            df['volume_change'] = df['volume'].pct_change()
+            df['volume_ema'] = ta.trend.EMAIndicator(df['volume'], window=20).ema_indicator()
+            df['volume_ratio'] = df['volume'] / df['volume_ema']
+
+            # Candlestick body features
+            df['candle_body'] = abs(df['close'] - df['open'])
+            df['candle_range'] = df['high'] - df['low']
+            df['upper_shadow'] = df['high'] - df[['close', 'open']].max(axis=1)
+            df['lower_shadow'] = df[['close', 'open']].min(axis=1) - df['low']
+
+            # Normalize w.r.t range to keep things scale-invariant
+            df['body_to_range'] = df['candle_body'] / df['candle_range'].replace(0, np.nan)
+            df['upper_to_range'] = df['upper_shadow'] / df['candle_range'].replace(0, np.nan)
+            df['lower_to_range'] = df['lower_shadow'] / df['candle_range'].replace(0, np.nan)
+
         except Exception as e:
             print(f"[ERROR] Failed to compute indicators for {interval}: {e}")
             continue
@@ -93,7 +110,10 @@ def fetch_features_multi_timeframe():
 
         required_cols = [
             'rsi', 'rsi_diff', 'macd_diff', 'ema_20', 'ema_50', 'atr', 'volume',
-            'cci', 'stoch_k', 'stoch_d', 'mom', 'bb_width'
+            'cci', 'stoch_k', 'stoch_d', 'mom', 'bb_width',
+            'volume_change', 'volume_ema', 'volume_ratio',
+            'candle_body', 'candle_range', 'upper_shadow', 'lower_shadow',
+            'body_to_range', 'upper_to_range', 'lower_to_range'
         ]
 
         if not all(col in df.columns for col in required_cols):
@@ -103,6 +123,9 @@ def fetch_features_multi_timeframe():
         df = df[required_cols]
         df.columns = [f"{col}_{interval}" for col in df.columns]
         all_dfs.append(df.reset_index(drop=True))
+
+        df.replace([np.inf, -np.inf], np.nan, inplace=True)
+        df.dropna(inplace=True)
 
     if not all_dfs:
         raise ValueError("[CRITICAL] All intervals failed. No data available for training or prediction.")

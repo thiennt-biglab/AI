@@ -7,6 +7,20 @@ from config import *
 # === Load Sentiment Pipeline ===
 sentiment_pipeline = pipeline("sentiment-analysis")
 
+# Category weights: mức độ ảnh hưởng đến thị trường
+CATEGORY_WEIGHTS = {
+    "FED": 1.5,
+    "War": 1.4,
+    "Crisis": 1.3,
+    "Recession": 1.3,
+    "Economy": 1.2,
+    "Influencers": 1.1,
+    "Binance": 1.0,
+    "Bitcoin": 1.0,
+    "Ethereum": 1.0,
+    "Altcoin": 0.8
+}
+
 def fetch_news():
     url = NEWS_URL
     from_date = (datetime.utcnow() - timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -42,21 +56,19 @@ def analyze_news():
         if not categories:
             continue
 
-        impact_score = 0
         for cat in categories:
+            weight = CATEGORY_WEIGHTS.get(cat, 1.0)
             if label == 'POSITIVE':
-                impact_score += 0.2
+                scores.append(0.25 * confidence * weight)
             elif label == 'NEGATIVE':
-                impact_score -= 0.3
-
-        scores.append(impact_score)
+                scores.append(-0.35 * confidence * weight)
 
     if not scores:
         return 0.0
 
     total = sum(scores)
-    return max(-0.5, min(0.5, total))  # clamp between -0.5 to +0.5
+    return max(-0.5, min(0.5, total))  # clamp giữa [-0.5, 0.5]
 
-# For debug usage:
+# For debug usage
 if __name__ == "__main__":
     print(f"Impact score: {analyze_news():.3f}")

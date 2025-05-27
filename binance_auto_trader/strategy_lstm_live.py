@@ -1,10 +1,10 @@
 # strategy_lstm_live.py
 import numpy as np
 import pandas as pd
-import ta
 from tensorflow.keras.models import load_model
 import joblib
-from news_sentiment import analyze_news 
+from news_sentiment import analyze_news
+from config import INTERVALS
 
 # Load model and scaler
 model = load_model("lstm_model.keras")
@@ -12,27 +12,18 @@ scaler = joblib.load("scaler.pkl")  # optional if saved during training
 
 # Constants
 WINDOW = 30
-FEATURES = [
-    'rsi', 'macd_diff', 'ema_20', 'ema_50', 'atr', 'volume'
-]
+FEATURES = [f"{col}_{interval}" for interval in INTERVALS for col in [
+    'rsi', 'rsi_diff', 'macd_diff', 'ema_20', 'ema_50', 'atr', 'volume',
+    'cci', 'stoch_k', 'stoch_d', 'mom', 'bb_width',
+    'volume_change', 'volume_ema', 'volume_ratio',
+    'candle_body', 'candle_range', 'upper_shadow', 'lower_shadow',
+    'body_to_range', 'upper_to_range', 'lower_to_range'
+]] + ['sentiment', 'btc_dominance', 'dxy', 'funding_rate']
 
 def preprocess_for_lstm(df: pd.DataFrame) -> np.ndarray:
     df = df.dropna()
     return scaler.transform(df)
 
-
-# You may need to match these to actual feature columns used during training
-def extract_features_live(df, interval_label="5m"):
-    df['rsi'] = ta.momentum.RSIIndicator(df['close']).rsi()
-    macd = ta.trend.MACD(df['close'])
-    df['macd_diff'] = macd.macd_diff()
-    df['ema_20'] = ta.trend.EMAIndicator(df['close'], window=20).ema_indicator()
-    df['ema_50'] = ta.trend.EMAIndicator(df['close'], window=50).ema_indicator()
-    df['atr'] = ta.volatility.AverageTrueRange(df['high'], df['low'], df['close']).average_true_range()
-    df.dropna(inplace=True)
-    df = df[['rsi', 'macd_diff', 'ema_20', 'ema_50', 'atr', 'volume']]
-    df.columns = [f"{col}_{interval_label}" for col in df.columns]
-    return df
 
 def lstm_based_action(df_combined):
     X_raw = df_combined.iloc[-30:]  # Giữ nguyên DataFrame và tên cột

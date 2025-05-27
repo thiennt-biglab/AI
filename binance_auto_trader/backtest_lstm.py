@@ -9,7 +9,7 @@ import seaborn as sns
 # Load model và dữ liệu đã lưu
 model = load_model("lstm_model.keras")
 scaler = joblib.load("scaler.pkl")
-X_seq, y_seq = joblib.load("lstm_data.pkl")  # từ lúc training đã lưu
+X_seq, y_seq, close_prices = joblib.load("lstm_data.pkl")  # từ lúc training đã lưu
 
 # Dự đoán
 y_pred_proba = model.predict(X_seq)
@@ -34,4 +34,40 @@ plt.ylabel('Actual')
 plt.title('Confusion Matrix for LSTM Model')
 plt.tight_layout()
 plt.savefig("confusion_matrix.png")
-plt.show()
+
+capital = 1000
+balance = capital
+position = None
+entry_price = 0
+fee_rate = 0.0004  # 0.04%
+
+for i in range(1, len(X_seq)):
+    price_now = close_prices[i]    # giả định close là [0]
+    pred = y_pred[i]
+    prev_pred = y_pred[i-1]
+
+
+    if position is None:
+        if pred == 1:  # LONG
+            position = 'LONG'
+            entry_price = price_now
+        elif pred == 2:  # SHORT
+            position = 'SHORT'
+            entry_price = price_now
+    else:
+        if (position == 'LONG' and pred != 1) or (position == 'SHORT' and pred != 2):
+            trade_value = balance
+            fee = trade_value * fee_rate
+
+            if position == 'LONG':
+                pnl = (price_now - entry_price) / entry_price
+            else:
+                pnl = (entry_price - price_now) / entry_price
+
+            profit = trade_value * pnl
+            balance += profit - 2 * fee
+            position = None
+
+final_profit = balance - capital
+print(f"\n🧪 Final capital: ${balance:.2f} (profit: ${final_profit:.2f})")
+
