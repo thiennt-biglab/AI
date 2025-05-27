@@ -1,7 +1,22 @@
 from config import *
-from trader import get_latest_klines, get_balance, calculate_qty, place_market_order, place_sl_tp_order, cancel_open_orders, get_current_position_side
-from feature_pipeline import fetch_features_multi_timeframe  # <=== Sử dụng lại
-from strategy_lstm_live import lstm_based_action, select_leverage
+from trader import (
+    get_latest_klines,
+    get_balance,
+    calculate_qty,
+    place_market_order,
+    place_sl_tp_order,
+    cancel_open_orders,
+    get_current_position_side,
+    close_position,
+    get_unrealized_pnl
+)
+from feature_pipeline import fetch_features_multi_timeframe
+from strategy_lstm_live import (
+    lstm_based_action,
+    select_leverage,
+    compute_min_leverage,
+    preprocess_for_lstm
+)
 import time
 import numpy as np
 
@@ -10,56 +25,91 @@ print("[START] Running Binance Futures Auto-Trader with LSTM Strategy")
 while True:
     try:
         df = fetch_features_multi_timeframe()
+        scaled_input = preprocess_for_lstm(df)
+
+        # === LẤY GIÁ TRỊ PHỤC VỤ TP/SL ===
+        price = df.filter(like='ema_20_').iloc[-1].values[0]
+        atr_cols = [col for col in df.columns if "atr" in col]
+        avg_atr = df[atr_cols].iloc[-1].mean()
+
+        # === TÍN HIỆU MÔ HÌNH ===
         action, confidence = lstm_based_action(df)
 
+        # === TP / SL TỰ ĐỘNG (dynamic theo thị trường + tín hiệu) ===
+        TAKE_PROFIT_RATIO = max(0.02, min(0.1, confidence * 0.04 + avg_atr / price))
+        LOSS_CUTOFF_RATIO = min(0.05, max(0.01, (1 - confidence) * 0.04 + avg_atr / price))
+
+        current_position = get_current_position_side(SYMBOL)
+        if current_position:
+            pnl = get_unrealized_pnl(SYMBOL)
+            balance = get_balance()
+            profit_ratio = pnl / balance if balance else 0
+
+            if profit_ratio >= TAKE_PROFIT_RATIO:
+                close_position(SYMBOL, current_position)
+                print(f"[AUTO-PROFIT] Closed {current_position} with profit {profit_ratio*100:.2f}% (TP {TAKE_PROFIT_RATIO*100:.2f}%)")
+                time.sleep(60)
+                continue
+            elif profit_ratio <= -LOSS_CUTOFF_RATIO:
+                close_position(SYMBOL, current_position)
+                print(f"[AUTO-STOP] Closed {current_position} with loss {profit_ratio*100:.2f}% (SL {LOSS_CUTOFF_RATIO*100:.2f}%)")
+                time.sleep(60)
+                continue
+            else:
+                print(f"[INFO] Profit {profit_ratio*100:.2f}% (TP {TAKE_PROFIT_RATIO*100:.2f}%, SL {LOSS_CUTOFF_RATIO*100:.2f}%) → Hold")
+
+        # === XỬ LÝ GIAO DỊCH MỚI ===
         if action != 'HOLD':
-            price = df.filter(like='ema_20_').iloc[-1].values[0]
             balance = get_balance()
             init_leverage = select_leverage(confidence)
-            leverage = init_leverage
-            qty = calculate_qty(balance, price, leverage, RISK_PERCENT)
-            
+            leverage = round(init_leverage)
+            qty = calculate_qty(balance, price, leverage, RISK_PERCENT, SYMBOL)
+
             if qty <= 0 or qty is None or np.isnan(qty):
                 print(f"[WARN] Invalid qty: {qty}, skipping trade.")
                 continue
 
             notional = qty * price
             if notional < 5:
-                # Tăng leverage để đạt đúng 5 USDT
-                min_leverage = int(np.ceil(5 / ((balance * RISK_PERCENT / 100) / price)))
+                min_leverage = compute_min_leverage(balance, price, RISK_PERCENT)
                 leverage = max(leverage, min_leverage)
                 qty = calculate_qty(balance, price, leverage, RISK_PERCENT)
                 notional = qty * price
                 if notional < 5:
                     print(f"[WARN] Even after leverage adjust, notional still < 5 USDT → skip")
                     continue
+                print(f"[ADJUST] Leverage changed to {leverage} to meet notional ${notional:.2f}")
+            else:
+                min_leverage = compute_min_leverage(balance, price, RISK_PERCENT)
+                print(f"[INFO] Leverage: {leverage} | Required min: {min_leverage}")
 
-            print(f"[WARN] Leverage main {leverage} min_leverage {min_leverage}")
-
-            # Lấy vị thế hiện tại
             current_position = get_current_position_side(SYMBOL)
+            action_to_take = 'HOLD'
 
-            # Nếu có vị thế đang giữ và tín hiệu đảo chiều mạnh
-            if current_position == 'LONG' and action == 'SHORT' and confidence > 0.8:
-                print(f"[AUTO-CLOSE] Closing LONG due to SHORT signal @ {confidence:.2f}")
+            print(f"[INFO] Current: {current_position} | Action: {action} | Confidence: {confidence:.2f}")
+
+            if current_position == 'LONG' and action == 'SHORT' and confidence >= SWITCH_THRESHOLD:
+                print(f"[AUTO-CLOSE] Closing LONG → SHORT @ {confidence:.2f}")
                 close_position(SYMBOL, 'LONG')
-                continue
-
-            if current_position == 'SHORT' and action == 'LONG' and confidence > 0.8:
-                print(f"[AUTO-CLOSE] Closing SHORT due to LONG signal @ {confidence:.2f}")
+                action_to_take = 'SHORT'
+            elif current_position == 'SHORT' and action == 'LONG' and confidence >= SWITCH_THRESHOLD:
+                print(f"[AUTO-CLOSE] Closing SHORT → LONG @ {confidence:.2f}")
                 close_position(SYMBOL, 'SHORT')
-                continue
+                action_to_take = 'LONG'
+            elif current_position is None and confidence >= ENTRY_THRESHOLD:
+                action_to_take = action
 
-            
-            place_market_order(SYMBOL, action, qty, leverage)
-            
-            position_side = 'LONG' if action == 'LONG' else 'SHORT'
-            cancel_open_orders(SYMBOL, position_side)
-            place_sl_tp_order(SYMBOL, action, qty, price)
-
-            print(f"[TRADE] {action} {qty} {SYMBOL} @ {price:.2f} | confidence: {confidence:.2f} | leverage: {leverage}x")
+            if action_to_take != 'HOLD':
+                place_market_order(SYMBOL, action_to_take, qty, leverage)
+                cancel_open_orders(SYMBOL, action_to_take)
+                place_sl_tp_order(SYMBOL, action_to_take, qty, price)
+                print(f"[TRADE] {action_to_take} {qty} {SYMBOL} @ {price:.4f} | Confidence: {confidence:.2f} | Leverage: {leverage}x")
+            else:
+                print("[INFO] Signal not strong enough to act.")
         else:
             print("[INFO] No trade signal.")
+
     except Exception as e:
         print(f"[ERROR] {e}")
+
     time.sleep(60)

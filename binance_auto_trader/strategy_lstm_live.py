@@ -3,9 +3,8 @@ import numpy as np
 import pandas as pd
 import ta
 from tensorflow.keras.models import load_model
-from sklearn.preprocessing import StandardScaler
 import joblib
-from feature_pipeline import fetch_features_multi_timeframe
+from news_sentiment import analyze_news 
 
 # Load model and scaler
 model = load_model("lstm_model.keras")
@@ -16,6 +15,11 @@ WINDOW = 30
 FEATURES = [
     'rsi', 'macd_diff', 'ema_20', 'ema_50', 'atr', 'volume'
 ]
+
+def preprocess_for_lstm(df: pd.DataFrame) -> np.ndarray:
+    df = df.dropna()
+    return scaler.transform(df)
+
 
 # You may need to match these to actual feature columns used during training
 def extract_features_live(df, interval_label="5m"):
@@ -30,21 +34,8 @@ def extract_features_live(df, interval_label="5m"):
     df.columns = [f"{col}_{interval_label}" for col in df.columns]
     return df
 
-def prepare_input(df_combined):
-    X_raw = df_combined.values
-    X_scaled = scaler.transform(X_raw)
-    X_seq = []
-    for i in range(len(X_scaled) - WINDOW, len(X_scaled)):
-        X_seq.append(X_scaled[i-WINDOW+1:i+1])
-    X_input = np.array(X_seq)
-    return X_input[-1:]  # latest sequence
-
 def lstm_based_action(df_combined):
-    model = load_model("lstm_model.keras")
-    scaler = joblib.load("scaler.pkl")
-    
-    df = fetch_features_multi_timeframe()
-    X_raw = df.values[-30:]  # giữ đúng khung
+    X_raw = df_combined.iloc[-30:]  # Giữ nguyên DataFrame và tên cột
     X_scaled = scaler.transform(X_raw)
     X_input = np.expand_dims(X_scaled, axis=0)
 
@@ -52,19 +43,40 @@ def lstm_based_action(df_combined):
     pred = np.argmax(proba)
     confidence = float(np.max(proba))
 
+    # Thêm ảnh hưởng từ tin tức
+    try:
+        impact_score = analyze_news()
+    except Exception as e:
+        print(f"[WARN] Failed to analyze news: {e}")
+        impact_score = 0.0
+
+    adjusted_conf = min(1.0, max(0.0, confidence + impact_score))
+
     if pred == 1:
-        return 'LONG', confidence
+        return 'LONG', adjusted_conf
     elif pred == 2:
-        return 'SHORT', confidence
-    return 'HOLD', confidence
+        return 'SHORT', adjusted_conf
+    return 'HOLD', adjusted_conf
+
 
 
 def select_leverage(confidence):
-    # Clamp confidence trong khoảng an toàn
+    # Giới hạn confidence trong khoảng 0.6 - 0.98
     confidence = max(0.7, min(confidence, 0.98))
-    # Tuyến tính từ 1x (0.7) → 15x (0.98)
-    leverage = 1 + (confidence - 0.7) / (0.98 - 0.7) * (15 - 1)
-    print(f"[INFO] leverage: {leverage}")
+    # Tuyến tính: 0.6 → 1x, 0.98 → 20x
+    leverage = 1 + (confidence - 0.7) / (0.98 - 0.7) * (20 - 1)
+    print(f"[INFO] leverage: {leverage:.2f}")
     return round(leverage, 1)
 
+def compute_min_leverage(balance, price, risk_percent, min_notional=5, max_leverage=20):
+    if balance <= 0 or price <= 0:
+        return max_leverage  # fallback nếu dữ liệu lỗi
+
+    capital = balance * (risk_percent / 100)  # vốn có thể dùng
+    required_qty = min_notional / price       # cần mua ít nhất bao nhiêu coin
+    raw_leverage = (required_qty * price) / capital
+
+    min_leverage = int(np.ceil(raw_leverage))
+    min_leverage = max(1, min(min_leverage, max_leverage))  # clamp trong [1, max_leverage]
+    return min_leverage
 
