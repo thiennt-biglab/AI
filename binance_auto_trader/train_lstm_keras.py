@@ -1,6 +1,7 @@
 import numpy as np
 from binance.client import Client
-from config import API_KEY, API_SECRET, SYMBOL, INTERVALS, BEST_MODEL_FILE
+
+from config import *
 from tensorflow.keras.models import Sequential, Model, load_model
 from tensorflow.keras.layers import LSTM, GRU, Bidirectional, Dense, Dropout, Input, MultiHeadAttention, LayerNormalization, GlobalAveragePooling1D, Add
 from tensorflow.keras.callbacks import ReduceLROnPlateau, EarlyStopping, ModelCheckpoint
@@ -13,18 +14,9 @@ from tensorflow.keras.layers import Conv1D, MaxPooling1D
 import joblib
 import os
 from feature_pipeline import fetch_features_multi_timeframe
+from loss import risk_loss, custom_loss, focal
 
 client = Client(API_KEY, API_SECRET)
-
-from tensorflow.keras import backend as K
-
-def focal_loss(gamma=2., alpha=0.25):
-    def loss(y_true, y_pred):
-        y_pred = K.clip(y_pred, K.epsilon(), 1. - K.epsilon())
-        cross_entropy = -y_true * K.log(y_pred)
-        loss = alpha * K.pow(1 - y_pred, gamma) * cross_entropy
-        return K.sum(loss, axis=1)
-    return loss
 
 L2_REG = 1e-3  # hoặc 1e-3 nếu muốn mạnh hơn
 
@@ -36,8 +28,8 @@ joblib.dump(scaler, "scaler.pkl")
 
 future_return = df[f'ema_20_{INTERVALS[0]}'].shift(-3) / df[f'ema_20_{INTERVALS[0]}'] - 1
 labels = np.zeros(len(future_return))
-labels[future_return > 0.003] = 1  # LONG
-labels[future_return < -0.003] = 2  # SHORT
+labels[future_return > LABEL_THRESHOLD] = 1  # LONG
+labels[future_return < -LABEL_THRESHOLD] = 2  # SHORT
 
 valid_idx = ~np.isnan(future_return)
 X = X[valid_idx]
@@ -68,7 +60,6 @@ y_test = to_categorical(y_test_raw, num_classes=3)
 print(dict(zip(["HOLD", "LONG", "SHORT"], np.bincount(y_seq.astype(int)))))
 print("True labels distribution:", np.bincount(np.argmax(y_test, axis=1)))
 
-focal = focal_loss(gamma=1.0, alpha=0.5)
 
 # === Model builders ===
 def build_model_lstm():
@@ -81,7 +72,7 @@ def build_model_lstm():
         Dropout(0.4),
         Dense(3, activation='softmax', kernel_regularizer=l2(L2_REG))
     ])
-    model.compile(optimizer='adam', loss=focal, metrics=['accuracy'])
+    model.compile(optimizer='adam', loss=custom_loss, metrics=['accuracy'])
     return model
 
 def build_model_gru():
@@ -94,7 +85,7 @@ def build_model_gru():
         Dropout(0.4),
         Dense(3, activation='softmax', kernel_regularizer=l2(L2_REG))
     ])
-    model.compile(optimizer='adam', loss=focal, metrics=['accuracy'])
+    model.compile(optimizer='adam', loss=custom_loss, metrics=['accuracy'])
     return model
 
 def build_model_bilstm():
@@ -107,7 +98,7 @@ def build_model_bilstm():
         Dropout(0.4),
         Dense(3, activation='softmax', kernel_regularizer=l2(L2_REG))
     ])
-    model.compile(optimizer='adam', loss=focal, metrics=['accuracy'])
+    model.compile(optimizer='adam', loss=custom_loss, metrics=['accuracy'])
     return model
 
 def build_model_lstm_attention():
@@ -122,7 +113,7 @@ def build_model_lstm_attention():
     x = Dropout(0.4)(x)
     outputs = Dense(3, activation='softmax', kernel_regularizer=l2(L2_REG))(x)
     model = Model(inputs, outputs)
-    model.compile(optimizer='adam', loss=focal, metrics=['accuracy'])
+    model.compile(optimizer='adam', loss=custom_loss, metrics=['accuracy'])
     return model
 
 def build_cnn_lstm_model():
@@ -135,7 +126,7 @@ def build_cnn_lstm_model():
         Dropout(0.4),
         Dense(3, activation='softmax', kernel_regularizer=l2(L2_REG))
     ])
-    model.compile(optimizer='adam', loss=focal, metrics=['accuracy'])
+    model.compile(optimizer='adam', loss=custom_loss, metrics=['accuracy'])
     return model
 
 def build_transformer_encoder_model():
@@ -155,7 +146,7 @@ def build_transformer_encoder_model():
     outputs = Dense(3, activation='softmax', kernel_regularizer=l2(L2_REG))(x)
 
     model = Model(inputs, outputs)
-    model.compile(optimizer='adam', loss=focal, metrics=['accuracy'])
+    model.compile(optimizer='adam', loss=custom_loss, metrics=['accuracy'])
     return model
 
 
@@ -164,7 +155,6 @@ models = {
     "gru": build_model_gru(),
     "bilstm": build_model_bilstm(),
     "lstm_attention": build_model_lstm_attention(),
-    "cnn_lstm": build_cnn_lstm_model(),
     "transformer_encoder": build_transformer_encoder_model()
 }
 
@@ -190,14 +180,14 @@ if __name__ == "__main__":
             batch_size=128,
             validation_split=0.1,
             callbacks=[
-                ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=15, cooldown=5, verbose=1),
-                EarlyStopping(monitor='val_loss', patience=30, restore_best_weights=True, verbose=1),
+                ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=12, cooldown=5, verbose=1),
+                EarlyStopping(monitor='val_loss', patience=35, restore_best_weights=True, verbose=1),
                 checkpoint
             ],
             verbose=1
         )
 
-        model = load_model(BEST_MODEL_FILE, custom_objects={"loss": focal})
+        model = load_model(BEST_MODEL_FILE, custom_objects={"loss": custom_loss})
 
         val_acc = max(history.history.get('val_accuracy', [0]))
         y_pred = model.predict(X_seq, verbose=0)

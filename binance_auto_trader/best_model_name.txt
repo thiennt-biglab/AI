@@ -1,1 +1,1 @@
-lstm
+gru
