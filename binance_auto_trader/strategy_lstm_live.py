@@ -1,15 +1,13 @@
 # strategy_lstm_live.py
 import numpy as np
-import pandas as pd
 from tensorflow.keras.models import load_model
 import joblib
 from news_sentiment import analyze_news
-from config import INTERVALS, BEST_MODEL_FILE
-from train_lstm_keras import focal_loss
+from config import *
+from scipy.stats import entropy
+from loss import risk_loss, focal, custom_loss
 
-# Load model and scaler
-focal = focal_loss(gamma=1.0, alpha=0.5)
-model = load_model(BEST_MODEL_FILE, custom_objects={'loss': focal})
+model = load_model(BEST_MODEL_FILE, custom_objects={'loss': custom_loss})
 scaler = joblib.load("scaler.pkl")  # optional if saved during training
 
 # Constants
@@ -43,15 +41,14 @@ def preprocess_for_lstm(df):
 
 
 def lstm_based_action(df_combined):
-    X_raw = df_combined.iloc[-30:]  # Giữ nguyên DataFrame và tên cột
+    X_raw = df_combined.iloc[-30:]
     X_scaled = scaler.transform(X_raw)
     X_input = np.expand_dims(X_scaled, axis=0)
 
     proba = model.predict(X_input, verbose=0)[0]
-    pred = np.argmax(proba)
-    confidence = float(np.max(proba))
 
-    # Thêm ảnh hưởng từ tin tức
+    confidence = 1.0 - entropy(proba, base=3)  # 0 = mơ hồ, 1 = rõ ràng
+
     try:
         impact_score = analyze_news()
     except Exception as e:
@@ -60,9 +57,10 @@ def lstm_based_action(df_combined):
 
     adjusted_conf = min(1.0, max(0.0, confidence + impact_score))
 
-    if pred == 1:
+    margin = 0.05  # khoảng cách cần thiết để vượt HOLD
+    if proba[1] > proba[0] + margin:
         return 'LONG', adjusted_conf
-    elif pred == 2:
+    elif proba[2] > proba[0] + margin:
         return 'SHORT', adjusted_conf
     return 'HOLD', adjusted_conf
 

@@ -12,9 +12,9 @@ from strategy_lstm_live import (
 import time
 import numpy as np
 from tensorflow.keras.models import load_model
-from train_lstm_keras import focal_loss
+from loss import focal, custom_loss, risk_loss
 
-COOLDOWN_SECONDS = 60
+COOLDOWN_SECONDS = 30
 DYNAMIC_TP_MIN = 0.02
 DYNAMIC_TP_MAX = 0.12
 DYNAMIC_SL_MIN = 0.015
@@ -52,8 +52,7 @@ def is_trend_confirmed(df, current_action):
 
 print("[START] Running Binance Futures Auto-Trader with LSTM Strategy")
 
-focal = focal_loss(gamma=1.0, alpha=0.5)
-model = load_model(BEST_MODEL_FILE, custom_objects={'loss': focal})
+model = load_model(FINETUNED_MODEL_FILE, custom_objects={'loss': custom_loss})
 
 while True:
     try:

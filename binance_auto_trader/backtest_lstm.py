@@ -1,16 +1,14 @@
 import numpy as np
 
-from config import BEST_MODEL_FILE
-from train_lstm_keras import focal_loss
+from config import *
 import joblib
 from tensorflow.keras.models import load_model
 import matplotlib.pyplot as plt
 from sklearn.metrics import classification_report, confusion_matrix
 import seaborn as sns
+from loss import focal, custom_loss, risk_loss
 
-# Load model và dữ liệu đã lưu
-focal = focal_loss(gamma=1.0, alpha=0.5)
-model = load_model(BEST_MODEL_FILE, custom_objects={'loss': focal})
+model = load_model(FINETUNED_MODEL_FILE, custom_objects={'loss': custom_loss})
 scaler = joblib.load("scaler.pkl")
 X_seq, y_seq, close_prices = joblib.load("lstm_data.pkl")  # từ lúc training đã lưu
 
