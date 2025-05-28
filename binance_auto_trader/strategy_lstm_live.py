@@ -4,10 +4,12 @@ import pandas as pd
 from tensorflow.keras.models import load_model
 import joblib
 from news_sentiment import analyze_news
-from config import INTERVALS
+from config import INTERVALS, BEST_MODEL_FILE
+from train_lstm_keras import focal_loss
 
 # Load model and scaler
-model = load_model("lstm_model.keras")
+focal = focal_loss(gamma=1.0, alpha=0.5)
+model = load_model(BEST_MODEL_FILE, custom_objects={'loss': focal})
 scaler = joblib.load("scaler.pkl")  # optional if saved during training
 
 # Constants
@@ -20,9 +22,24 @@ FEATURES = [f"{col}_{interval}" for interval in INTERVALS for col in [
     'body_to_range', 'upper_to_range', 'lower_to_range'
 ]] + ['sentiment', 'btc_dominance', 'dxy', 'funding_rate']
 
-def preprocess_for_lstm(df: pd.DataFrame) -> np.ndarray:
+import joblib
+
+scaler = joblib.load("scaler.pkl")
+WINDOW_SIZE = 30
+
+def preprocess_for_lstm(df):
     df = df.dropna()
-    return scaler.transform(df)
+    features = df.values
+    scaled = scaler.transform(features)
+
+    X = []
+    for i in range(WINDOW_SIZE, len(scaled)):
+        X.append(scaled[i - WINDOW_SIZE:i])
+
+    if not X:
+        raise ValueError("Not enough data for window")
+
+    return np.expand_dims(X[-1], axis=0)  # shape: (1, 30, num_features)
 
 
 def lstm_based_action(df_combined):
@@ -30,7 +47,7 @@ def lstm_based_action(df_combined):
     X_scaled = scaler.transform(X_raw)
     X_input = np.expand_dims(X_scaled, axis=0)
 
-    proba = model.predict(X_input)[0]
+    proba = model.predict(X_input, verbose=0)[0]
     pred = np.argmax(proba)
     confidence = float(np.max(proba))
 

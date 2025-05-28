@@ -82,22 +82,29 @@ def get_qty_limits(symbol):
 def calculate_qty(balance, price, leverage, risk_percent, symbol=SYMBOL):
     capital = balance * (risk_percent / 100)
     limits = get_qty_limits(symbol)
-    for attempt in range(5):
+    
+    for attempt in range(10):
         raw_qty = (capital * leverage) / price
         qty = round_step_size(raw_qty, limits['stepSize'])
+
         if qty > limits['maxQty']:
             print(f"[WARN] Qty {qty} > maxQty {limits['maxQty']} → giảm leverage (hiện tại: {leverage}x)")
             leverage -= 1
-            if leverage < 1:
-                print(f"[ERROR] Leverage đã xuống dưới 1x → dừng.")
-                return 0.0
+            if leverage < MIN_LEVERAGE:
+                print(f"[ERROR] Leverage đã xuống dưới {MIN_LEVERAGE}x → dừng.")
+                return 0.0, leverage
         elif qty < limits['minQty']:
             print(f"[WARN] Qty {qty} < minQty {limits['minQty']} → tăng leverage nhẹ")
             leverage += 1
+            if leverage > MAX_LEVERAGE:
+                print(f"[ERROR] Leverage vượt quá {MAX_LEVERAGE}x → dừng.")
+                return 0.0, leverage
         else:
-            return qty
+            return qty, leverage
+
     print("[ERROR] Không thể tìm được leverage phù hợp để có qty hợp lệ.")
-    return 0.0
+    return 0.0, leverage
+
 
 def get_open_position_qty(symbol, side):
     positions = safe_api_call(client.futures_position_information, symbol=symbol, signed=True)

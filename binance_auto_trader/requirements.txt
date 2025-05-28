@@ -24,3 +24,4 @@ matplotlib==3.7.1
 
 seaborn
 keras-tcn
+ace_tools
