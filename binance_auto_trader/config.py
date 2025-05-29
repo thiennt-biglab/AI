@@ -24,6 +24,13 @@ AlPHA_LONG = 3.0
 ALPHA_SHORT = 3.0
 ALPHA_HOLD = 0.5
 
+FOCAL_LOSS_GAMMA = 2.0
+FOCAL_LOSS_ALPHA = [0.1, 0.2, 0.3]
+
+AlPHA_LONG = 3.0
+ALPHA_SHORT = 3.0
+ALPHA_HOLD = 0.5
+
 NEWS_API_KEY = "b4dc4b3d6c7c4fd6bd0440b3ea507937"  # replace with your key
 QUERY = "crypto OR bitcoin OR ethereum OR fed OR inflation OR binance OR usdt OR usdc OR recession OR war OR conflict OR missile OR Elon Musk OR Powell OR Vitalik OR CZ OR ETF"
 
