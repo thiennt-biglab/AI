@@ -19,6 +19,7 @@ from strategy_lstm_live import (
 )
 import time
 import numpy as np
+import traceback
 
 print("[START] Running Binance Futures Auto-Trader with LSTM Strategy")
 
@@ -27,7 +28,15 @@ while True:
         df = fetch_features_multi_timeframe()
         scaled_input = preprocess_for_lstm(df)
 
-        price = df.filter(like='ema_20_').iloc[-1].values[0]
+        try:
+            klines = get_latest_klines(SYMBOL, interval='1m', limit=1)
+            print(f"[DEBUG] Latest kline: {klines}")
+            price = float(klines.iloc[0]['close'])
+        except Exception as e:
+            print(f"[ERROR] When fetching price: {e.__class__.__name__}: {e}")
+            traceback.print_exc()
+
+
         atr_cols = [col for col in df.columns if "atr" in col]
         avg_atr = df[atr_cols].iloc[-1].mean()
 
