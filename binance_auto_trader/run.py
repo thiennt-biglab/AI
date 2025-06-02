@@ -27,15 +27,12 @@ while True:
         df = fetch_features_multi_timeframe()
         scaled_input = preprocess_for_lstm(df)
 
-        # === LẤY GIÁ TRỊ PHỤC VỤ TP/SL ===
         price = df.filter(like='ema_20_').iloc[-1].values[0]
         atr_cols = [col for col in df.columns if "atr" in col]
         avg_atr = df[atr_cols].iloc[-1].mean()
 
-        # === TÍN HIỆU MÔ HÌNH ===
         action, confidence = lstm_based_action(df)
 
-        # === TP / SL TỰ ĐỘNG (dynamic theo thị trường + tín hiệu) ===
         TAKE_PROFIT_RATIO = max(0.02, min(0.1, confidence * 0.04 + avg_atr / price))
         LOSS_CUTOFF_RATIO = min(0.05, max(0.01, (1 - confidence) * 0.04 + avg_atr / price))
 
@@ -46,21 +43,39 @@ while True:
             profit_ratio = pnl / balance if balance else 0
 
             print(f"[INFO] Current position: {current_position} | PnL: {pnl:.2f} | Balance: {balance:.2f} | Profit Ratio: {profit_ratio*100:.2f}%")
-            # Kiểm tra TP/SL
+
+            if not hasattr(close_position, "peak_profit"):
+                close_position.peak_profit = profit_ratio
+            if profit_ratio > close_position.peak_profit:
+                close_position.peak_profit = profit_ratio
+
+            trailing_trigger = 0.03
+            trailing_drawdown = 0.5
+
+            if close_position.peak_profit >= trailing_trigger:
+                stop_threshold = close_position.peak_profit * (1 - trailing_drawdown)
+                if profit_ratio <= stop_threshold:
+                    print(f"[TRAILING-STOP] Profit dropped from {close_position.peak_profit*100:.2f}% to {profit_ratio*100:.2f}% → Closing")
+                    close_position(SYMBOL, current_position)
+                    close_position.peak_profit = 0
+                    time.sleep(60)
+                    continue
+
             if profit_ratio >= TAKE_PROFIT_RATIO:
                 close_position(SYMBOL, current_position)
+                close_position.peak_profit = 0
                 print(f"[AUTO-PROFIT] Closed {current_position} with profit {profit_ratio*100:.2f}% (TP {TAKE_PROFIT_RATIO*100:.2f}%)")
                 time.sleep(60)
                 continue
             elif profit_ratio <= -LOSS_CUTOFF_RATIO:
                 close_position(SYMBOL, current_position)
+                close_position.peak_profit = 0
                 print(f"[AUTO-STOP] Closed {current_position} with loss {profit_ratio*100:.2f}% (SL {LOSS_CUTOFF_RATIO*100:.2f}%)")
                 time.sleep(60)
                 continue
             else:
                 print(f"[INFO] Profit {profit_ratio*100:.2f}% (TP {TAKE_PROFIT_RATIO*100:.2f}%, SL {LOSS_CUTOFF_RATIO*100:.2f}%) → Hold")
 
-        # === XỬ LÝ GIAO DỊCH MỚI ===
         print(f"[INFO] Action: {action} | Confidence: {confidence:.2f} | Price: {price:.4f}")
         if action != 'HOLD':
             balance = get_balance()

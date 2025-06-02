@@ -194,55 +194,50 @@ if __name__ == "__main__":
         close_prices = df[f"ema_20_{INTERVALS[0]}"].values
         close_prices = close_prices[~np.isnan(future_return)][window:]
 
-        capital = 1000
+        capital = 60
+        TP = 0.01   # 1% Take Profit
+        SL = 0.005  # 0.5% Stop Loss
+        profits = []
+
         for i in range(len(y_class) - 3):
             pred = y_class[i]
-            price_now = close_prices[i]
-            price_next = close_prices[i + 3]
+            price_entry = close_prices[i]
 
             if pred == 1:  # LONG
-                change = (price_next - price_now) / price_now
-                capital *= (1 + change)
+                for j in range(1, 4):
+                    price_now = close_prices[i + j]
+                    change = (price_now - price_entry) / price_entry
+                    if change >= TP:
+                        capital *= (1 + TP)
+                        profits.append(TP)
+                        break
+                    elif change <= -SL:
+                        capital *= (1 - SL)
+                        profits.append(-SL)
+                        break
+                else:
+                    change = (close_prices[i + 3] - price_entry) / price_entry
+                    capital *= (1 + change)
+                    profits.append(change)
+
             elif pred == 2:  # SHORT
-                change = (price_now - price_next) / price_now
-                capital *= (1 + change)
+                for j in range(1, 4):
+                    price_now = close_prices[i + j]
+                    change = (price_entry - price_now) / price_entry
+                    if change >= TP:
+                        capital *= (1 + TP)
+                        profits.append(TP)
+                        break
+                    elif change <= -SL:
+                        capital *= (1 - SL)
+                        profits.append(-SL)
+                        break
+                else:
+                    change = (price_entry - close_prices[i + 3]) / price_entry
+                    capital *= (1 + change)
+                    profits.append(change)
 
-        profit = capital - 1000
-        print(f"{name} | Val Accuracy: {val_acc:.4f} | Profit: ${profit:.2f}")
-
-        results.append({
-            "name": name,
-            "model": model,
-            "val_acc": val_acc,
-            "profit": profit,
-            "history": history
-        })
-
-    # Normalize & compute final score
-    min_profit = min(r["profit"] for r in results)
-    max_profit = max(r["profit"] for r in results)
-
-    def normalize_profit(p):
-        return (p - min_profit) / (max_profit - min_profit) if max_profit > min_profit else 0.0
-
-    acc_weight = 0.95  # 🎯 bạn có thể đổi sang 0.6, 0.3, v.v.
-
-    for r in results:
-        norm_profit = normalize_profit(r["profit"])
-        r["combined_score"] = r["val_acc"] * acc_weight + norm_profit * (1 - acc_weight)
-
-    best_result = max(results, key=lambda x: x["combined_score"])
-
-    best_model = best_result["model"]
-    best_name = best_result["name"]
-    best_profit = best_result["profit"]
-    best_score = best_result["combined_score"]
-    best_history = best_result["history"]
-
-    best_model.save('lstm_model.keras')
-    joblib.dump((X_seq, y_seq, close_prices), "lstm_data.pkl")
-
-    with open("best_model_name.txt", "w") as f:
-        f.write(best_name)
-
-    print(f"✅ Best model: {best_name} | Profit: ${best_profit:.2f} | Combined Score: {best_score:.4f}")
+        profit = capital - 60
+        avg_trade = np.mean(profits) * 100 if profits else 0
+        std_trade = np.std(profits) * 100 if profits else 0
+        print(f"{name} | Val Accuracy: {val_acc:.4f} | Profit: ${profit:.2f} | Avg Trade: {avg_trade:.3f}% | Std: {std_trade:.3f}%")

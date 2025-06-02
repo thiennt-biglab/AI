@@ -4,7 +4,7 @@ API_SECRET = "4iRKlKY9OTYNzY85D1Z4CRIQyq82oX5VCnh6htCT3dHtzsZ5OvGrO3rzuETNRmBg"
 SYMBOL = "WIFUSDT"
 INTERVALS = ["5m", "15m", "1h"]  # Multiple timeframes
 DEFAULT_LEVERAGE = 5
-RISK_PERCENT = 1.5  # % số dư
+RISK_PERCENT = 10  # % số dư
 
 MIN_RSI_LONG = 28
 MAX_RSI_SHORT = 72
@@ -31,3 +31,5 @@ KEYWORDS = {
 }
 
 NEWS_URL = "https://newsapi.org/v2/everything"
+TRAINED_MODE_PATH = "lstm_model.keras"
+FINE_TUNE_MODEL_PATH = "fined_tune_model.keras"

@@ -5,9 +5,10 @@ from tensorflow.keras.models import load_model
 import matplotlib.pyplot as plt
 from sklearn.metrics import classification_report, confusion_matrix
 import seaborn as sns
+from config import *
 
 # Load model và dữ liệu đã lưu
-model = load_model("lstm_model.keras")
+model = load_model(FINE_TUNE_MODEL_PATH)
 scaler = joblib.load("scaler.pkl")
 X_seq, y_seq, close_prices = joblib.load("lstm_data.pkl")  # từ lúc training đã lưu
 

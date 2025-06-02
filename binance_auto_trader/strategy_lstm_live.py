@@ -4,10 +4,10 @@ import pandas as pd
 from tensorflow.keras.models import load_model
 import joblib
 from news_sentiment import analyze_news
-from config import INTERVALS
+from config import *
 
 # Load model and scaler
-model = load_model("lstm_model.keras")
+model = load_model(FINE_TUNE_MODEL_PATH)
 scaler = joblib.load("scaler.pkl")  # optional if saved during training
 
 # Constants

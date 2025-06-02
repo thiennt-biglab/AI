@@ -10,7 +10,7 @@ from trader import safe_api_call
 
 client = Client(API_KEY, API_SECRET)
 
-def fetch_full_klines(symbol, interval, total_limit=5000):
+def fetch_full_klines(symbol, interval, total_limit=50000):
     all_klines = []
     last_time = None
 
@@ -58,9 +58,9 @@ def fetch_features_multi_timeframe():
     all_dfs = []
 
     for interval in INTERVALS:
-        klines = fetch_full_klines(SYMBOL, interval, total_limit=5000)
+        klines = fetch_full_klines(SYMBOL, interval, total_limit=50000)
 
-        if not klines or len(klines) < 100:
+        if not klines or len(klines) < 1000:
             print(f"[ERROR] Klines for {interval} is too short or empty.")
             continue
 
