@@ -25,8 +25,10 @@ from datetime import datetime
 def log(msg):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
 
-
 log("[START] Running Binance Futures Auto-Trader with LSTM Strategy")
+consecutive_losses = 0
+ENTRY_THRESHOLD_BASE = ENTRY_THRESHOLD
+last_switch_time = 0  # chống đảo lệnh liên tục
 
 while True:
     try:
@@ -45,12 +47,15 @@ while True:
 
         action, confidence = lstm_based_action(df)
 
-        # ATR-based base range (cỡ TP/SL theo volatility)
-        base_range = avg_atr / price  # ví dụ 0.01 ~ 1% biến động
-        # TP rộng hơn khi confidence cao, nhưng vẫn giới hạn trong khoảng hợp lý
-        # TP ít hơn, SL chặt hơn
+        # === Trend Detection ===
+        ema_fast = df['ema_10m'].iloc[-1] if 'ema_10m' in df.columns else None
+        ema_slow = df['ema_50m'].iloc[-1] if 'ema_50m' in df.columns else None
+        trend = 'UP' if ema_fast and ema_slow and ema_fast > ema_slow else 'DOWN'
+
+        # === Dynamic TP/SL theo ATR và confidence ===
+        base_range = avg_atr / price
         TAKE_PROFIT_RATIO = round(min(0.05, max(0.015, base_range * (1.0 + confidence))), 4)
-        LOSS_CUTOFF_RATIO = round(min(0.03, max(0.006, base_range * (0.8 + (1 - confidence)))), 4)
+        LOSS_CUTOFF_RATIO = round(min(0.03, max(0.006, base_range * (1.0 - confidence + 0.2))), 4)
 
         current_position = get_current_position_side(SYMBOL)
         if current_position:
@@ -80,12 +85,16 @@ while True:
             if profit_ratio >= TAKE_PROFIT_RATIO:
                 close_position(SYMBOL, current_position)
                 close_position.peak_profit = 0
+                consecutive_losses = 0
+                ENTRY_THRESHOLD = ENTRY_THRESHOLD_BASE
                 log(f"[AUTO-PROFIT] Closed {current_position} with profit {profit_ratio*100:.2f}% (TP {TAKE_PROFIT_RATIO*100:.2f}%)")
                 time.sleep(60)
                 continue
             elif profit_ratio <= -LOSS_CUTOFF_RATIO:
                 close_position(SYMBOL, current_position)
                 close_position.peak_profit = 0
+                consecutive_losses += 1
+                ENTRY_THRESHOLD = min(0.95, ENTRY_THRESHOLD_BASE + consecutive_losses * 0.01)
                 log(f"[AUTO-STOP] Closed {current_position} with loss {profit_ratio*100:.2f}% (SL {LOSS_CUTOFF_RATIO*100:.2f}%)")
                 time.sleep(60)
                 continue
@@ -100,20 +109,25 @@ while True:
                 log(f"[FILTER] Confidence {confidence:.2f} < ENTRY_THRESHOLD → Bỏ qua tín hiệu")
                 continue
 
-            # Xác nhận hành vi 2 nến liên tiếp
             action_prev, _ = lstm_based_action(df[:-1])
             if action != action_prev:
                 log(f"[FILTER] Hành vi không ổn định (trước: {action_prev}, hiện tại: {action}) → Bỏ")
                 continue
 
-            # RSI xác nhận động lượng
             rsi_now = df['rsi_5m'].iloc[-1] if 'rsi_5m' in df.columns else None
             if rsi_now:
-                if (action == 'LONG' and rsi_now < 55) or (action == 'SHORT' and rsi_now > 45):
+                if (action == 'LONG' and rsi_now < 50) or (action == 'SHORT' and rsi_now > 40):
                     log(f"[FILTER] RSI ({rsi_now:.2f}) không xác nhận đủ mạnh cho {action} → Bỏ")
                     continue
 
-            # Biến động quá thấp
+            if trend:
+                if action == 'LONG' and trend != 'UP':
+                    log(f"[FILTER] Trend đang DOWN, không nên vào LONG")
+                    continue
+                if action == 'SHORT' and trend != 'DOWN':
+                    log(f"[FILTER] Trend đang UP, không nên vào SHORT")
+                    continue
+
             if avg_atr / price < 0.003:
                 log(f"[FILTER] ATR/Price = {avg_atr/price:.4f} < 0.003 → Thị trường quá tĩnh → Bỏ")
                 continue
@@ -147,13 +161,41 @@ while True:
 
             log(f"[INFO] Current: {current_position} | Action: {action} | Confidence: {confidence:.2f}")
 
+            # === Debounce Switch Delay ===
+            if (current_position in ['LONG', 'SHORT']) and (action != current_position) and confidence >= SWITCH_THRESHOLD:
+                if time.time() - last_switch_time < 180:
+                    log("[SKIP] Vừa switch gần đây → chờ thêm")
+                    continue
+
+            # === Trailing-stop bảo vệ lời trước khi switch ===
+            if current_position:
+                pnl = get_unrealized_pnl(SYMBOL)
+                balance = get_balance()
+                profit_ratio = pnl / balance if balance else 0
+
+                if not hasattr(close_position, "peak_profit"):
+                    close_position.peak_profit = profit_ratio
+                if profit_ratio > close_position.peak_profit:
+                    close_position.peak_profit = profit_ratio
+
+                if close_position.peak_profit >= trailing_trigger:
+                    stop_threshold = close_position.peak_profit * (1 - trailing_drawdown)
+                    if profit_ratio <= stop_threshold:
+                        log(f"[TRAILING-SWITCH] Profit giảm mạnh từ {close_position.peak_profit*100:.2f}% → đóng lệnh trước khi switch")
+                        close_position(SYMBOL, current_position)
+                        close_position.peak_profit = 0
+                        time.sleep(60)
+                        continue
+
             if current_position == 'LONG' and action == 'SHORT' and confidence >= SWITCH_THRESHOLD:
                 log(f"[AUTO-CLOSE] Closing LONG → SHORT @ {confidence:.2f}")
                 close_position(SYMBOL, 'LONG')
+                last_switch_time = time.time()
                 action_to_take = 'SHORT'
             elif current_position == 'SHORT' and action == 'LONG' and confidence >= SWITCH_THRESHOLD:
                 log(f"[AUTO-CLOSE] Closing SHORT → LONG @ {confidence:.2f}")
                 close_position(SYMBOL, 'SHORT')
+                last_switch_time = time.time()
                 action_to_take = 'LONG'
             elif current_position is None and confidence >= ENTRY_THRESHOLD:
                 action_to_take = action
@@ -167,9 +209,13 @@ while True:
                 if should_cancel:
                     cancel_open_orders(SYMBOL, current_position)
 
-                place_market_order(SYMBOL, action_to_take, qty, leverage)
-                sl, tp = place_sl_tp_order(SYMBOL, action_to_take, qty, price, TAKE_PROFIT_RATIO, LOSS_CUTOFF_RATIO)
-                log(f"[TRADE] {action_to_take} {qty} {SYMBOL} @ {price:.4f} | Confidence: {confidence:.2f} | Leverage: {leverage}x | TP: {tp} | SL: {sl}")
+                order, entry_price = place_market_order(SYMBOL, action_to_take, qty, leverage)
+                if not entry_price:
+                    log("[ERROR] Không lấy được entry price sau khi đặt lệnh!")
+                    continue
+
+                sl, tp = place_sl_tp_order(SYMBOL, action_to_take, qty, entry_price, TAKE_PROFIT_RATIO, LOSS_CUTOFF_RATIO)
+                log(f"[TRADE] {action_to_take} {qty} {SYMBOL} @ {entry_price:.4f} | Confidence: {confidence:.2f} | Leverage: {leverage}x | TP: {tp} | SL: {sl}")
             else:
                 log("[INFO] Signal not strong enough to act.")
         else:

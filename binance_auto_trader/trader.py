@@ -170,13 +170,14 @@ def get_current_position_side(symbol):
 def place_market_order(symbol, side, qty, leverage):
     if qty is None or qty <= 0 or np.isnan(qty):
         print(f"[ERROR] Invalid quantity: {qty}")
-        return
+        return None, None
     if leverage is None or np.isnan(leverage) or leverage <= 0:
         print(f"[ERROR] Invalid leverage: {leverage}")
-        return
+        return None, None
 
     leverage = int(leverage)
     safe_api_call(client.futures_change_leverage, symbol=symbol, leverage=leverage)
+
     position_mode = safe_api_call(client.futures_get_position_mode)
     order_args = {
         "symbol": symbol,
@@ -187,7 +188,20 @@ def place_market_order(symbol, side, qty, leverage):
     if position_mode and position_mode.get('dualSidePosition'):
         order_args["positionSide"] = 'LONG' if side == 'LONG' else 'SHORT'
 
-    return safe_api_call(client.futures_create_order, **order_args)
+    order = safe_api_call(client.futures_create_order, **order_args)
+
+    # Đợi một chút để Binance cập nhật
+    time.sleep(1.5)
+
+    # Lấy lại entry price thực tế
+    positions = safe_api_call(client.futures_position_information, symbol=symbol)
+    entry_price = None
+    for p in positions:
+        if p['positionSide'] == ('LONG' if side == 'LONG' else 'SHORT') and float(p['positionAmt']) != 0:
+            entry_price = float(p['entryPrice'])
+            break
+
+    return order, entry_price
 
 def place_sl_tp_order(symbol, side, qty, entry_price, tp_ratio, sl_ratio):
     sl_price = entry_price * (1 - sl_ratio) if side == 'LONG' else entry_price * (1 + sl_ratio)
@@ -201,7 +215,9 @@ def place_sl_tp_order(symbol, side, qty, entry_price, tp_ratio, sl_ratio):
                              stopPrice=round(sl_price, 5),
                              closePosition=True,
                              positionSide=position_side,
-                             timeInForce=TIME_IN_FORCE_GTC
+                             timeInForce=TIME_IN_FORCE_GTC,
+                             priceProtect=True,
+                             workingType='MARK_PRICE'
                              )
 
     tp_order = safe_api_call(client.futures_create_order,
@@ -211,8 +227,11 @@ def place_sl_tp_order(symbol, side, qty, entry_price, tp_ratio, sl_ratio):
                              stopPrice=round(tp_price, 5),
                              closePosition=True,
                              positionSide=position_side,
-                             timeInForce=TIME_IN_FORCE_GTC
+                             timeInForce=TIME_IN_FORCE_GTC,
+                             priceProtect=True,
+                             workingType='MARK_PRICE'
                              )
 
     return sl_order, tp_order
+
 

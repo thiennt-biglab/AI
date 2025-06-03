@@ -12,10 +12,13 @@ model = load_model(FINE_TUNE_MODEL_PATH)
 scaler = joblib.load("scaler.pkl")
 X_seq, y_seq, close_prices = joblib.load("lstm_data.pkl")  # từ lúc training đã lưu
 
-if X_seq.shape[1] > SEQ_LEN_MODEL:
-    X_seq = X_seq[:, -SEQ_LEN_MODEL:, :]
-elif X_seq.shape[1] < SEQ_LEN_MODEL:
-    raise ValueError(f"X_seq có độ dài {X_seq.shape[1]} nhỏ hơn SEQ_LEN_MODEL={SEQ_LEN_MODEL}")
+# Adjust sequence length for compatibility
+EXPECTED_SEQ_LEN = model.input_shape[1]
+if X_seq.shape[1] > EXPECTED_SEQ_LEN:
+    X_seq = X_seq[:, -EXPECTED_SEQ_LEN:, :]
+elif X_seq.shape[1] < EXPECTED_SEQ_LEN:
+    pad_width = EXPECTED_SEQ_LEN - X_seq.shape[1]
+    X_seq = np.pad(X_seq, ((0, 0), (pad_width, 0), (0, 0)), mode='edge')
 
 # Dự đoán
 y_pred_proba = model.predict(X_seq)
@@ -48,12 +51,21 @@ position = None
 entry_price = 0
 fee_rate = 0.0004  # 0.04%
 equity_curve = [capital]
-TP = 0.01  # 1%
-SL = 0.005  # 0.5%
+TP = 0.02  # 2%
+SL = 0.01  # 1%
+win_count = 0
+lose_count = 0
 
-for i in range(1, len(X_seq) - 3):
+i = 1
+while i < len(X_seq) - 3:
     price_now = close_prices[i]
     pred = y_pred[i]
+
+    # Bỏ qua tín hiệu yếu
+    if np.max(y_pred_proba[i]) < 0.6:
+        equity_curve.append(balance)
+        i += 1
+        continue
 
     if position is None:
         if pred == 1:  # LONG
@@ -73,10 +85,12 @@ for i in range(1, len(X_seq) - 3):
 
             if change >= TP:
                 pnl = TP
+                win_count += 1
                 exit = True
                 break
             elif change <= -SL:
                 pnl = -SL
+                lose_count += 1
                 exit = True
                 break
 
@@ -86,17 +100,26 @@ for i in range(1, len(X_seq) - 3):
                 pnl = (final_price - entry_price) / entry_price
             else:
                 pnl = (entry_price - final_price) / entry_price
+            if pnl > 0:
+                win_count += 1
+            else:
+                lose_count += 1
 
         trade_value = balance
         fee = trade_value * fee_rate
         profit = trade_value * pnl
-        balance += profit - 2 * fee
+        balance += profit - fee  # chỉ tính 1 chiều phí để dễ phân tích
         position = None
+        i += 3  # skip future bars đã dùng
+        equity_curve.append(balance)
+        continue
 
     equity_curve.append(balance)
+    i += 1
 
 final_profit = balance - capital
-print(f"\n🧪 Final capital: ${balance:.2f} (profit: ${final_profit:.2f})")
+print(f"\n\U0001F9EA Final capital: ${balance:.2f} (profit: ${final_profit:.2f})")
+print(f"✅ Tổng lệnh thắng: {win_count}, ❌ Lệnh thua: {lose_count}, 📉 Winrate: {win_count / (win_count + lose_count + 1e-9):.2%}")
 
 # Vẽ Equity Curve
 plt.figure(figsize=(10, 4))
@@ -108,4 +131,3 @@ plt.grid(True)
 plt.legend()
 plt.tight_layout()
 plt.savefig("equity_curve.png")
-plt.show()

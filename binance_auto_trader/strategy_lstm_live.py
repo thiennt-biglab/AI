@@ -48,14 +48,12 @@ def lstm_based_action(df_combined):
     return 'HOLD', adjusted_conf
 
 
-
 def select_leverage(confidence):
-    # Giới hạn confidence trong khoảng 0.6 - 0.98
-    confidence = max(0.7, min(confidence, 0.98))
-    # Tuyến tính: 0.6 → 1x, 0.98 → 20x
-    leverage = 1 + (confidence - 0.7) / (0.98 - 0.7) * (20 - 1)
+    confidence = max(0.6, min(confidence, 0.98))
+    # Hàm mũ để tăng nhanh về cuối
+    leverage = 1 + ((confidence - 0.6) / (0.98 - 0.6)) ** 2 * (20 - 1)
     print(f"[INFO] leverage: {leverage:.2f}")
-    return round(leverage, 1)
+    return round(leverage, 3)
 
 def compute_min_leverage(balance, price, risk_percent, min_notional=5, max_leverage=20):
     if balance <= 0 or price <= 0:
