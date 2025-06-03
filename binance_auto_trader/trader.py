@@ -109,6 +109,24 @@ def get_open_position_qty(symbol, side):
             print(f"[WARN] Lỗi khi đọc vị trí: {e}")
     return 0.0
 
+def close_partial_position(symbol, side, qty):
+    if qty <= 0:
+        print(f"[INFO] Invalid partial qty ({qty}) for closing {side}")
+        return
+    order = safe_api_call(
+        client.futures_create_order,
+        symbol=symbol,
+        side=SIDE_SELL if side == 'LONG' else SIDE_BUY,
+        type=ORDER_TYPE_MARKET,
+        quantity=round(qty, 3),
+        reduceOnly=True,
+        positionSide=side
+    )
+    if order:
+        print(f"[PARTIAL-CLOSE] Closed {qty} {symbol} from {side} position")
+    else:
+        print(f"[ERROR] Failed to partially close {side} position of {qty}")
+
 def close_position(symbol, side):
     qty = get_open_position_qty(symbol, side)
     if qty <= 0:

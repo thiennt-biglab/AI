@@ -8,7 +8,9 @@ from trader import (
     get_current_position_side,
     close_position,
     get_unrealized_pnl,
-    get_realtime_price
+    get_realtime_price,
+    get_open_position_qty,
+    close_partial_position
 )
 from feature_pipeline import fetch_features_multi_timeframe
 from strategy_lstm_live import (
@@ -19,11 +21,24 @@ from strategy_lstm_live import (
 )
 import time
 import numpy as np
-import traceback
 from datetime import datetime
+
+PARTIAL_TP_1_DONE = False
+PARTIAL_TP_2_DONE = False
 
 def log(msg):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
+
+def handle_close_position(reason, symbol, position, profit_ratio, reset_peak=True, reset_partial=True, wait_after=60):
+    log(f"[CLOSE] Reason: {reason} | PnL: {profit_ratio*100:.2f}%")
+    close_position(symbol, position)
+    if reset_peak:
+        close_position.peak_profit = 0
+    if reset_partial:
+        global PARTIAL_TP_1_DONE, PARTIAL_TP_2_DONE
+        PARTIAL_TP_1_DONE = False
+        PARTIAL_TP_2_DONE = False
+    time.sleep(wait_after)
 
 log("[START] Running Binance Futures Auto-Trader with LSTM Strategy")
 consecutive_losses = 0
@@ -51,6 +66,9 @@ while True:
         TAKE_PROFIT_RATIO = round(min(0.05, max(0.015, base_range * (1.0 + confidence))), 4)
         LOSS_CUTOFF_RATIO = round(min(0.03, max(0.006, base_range * (1.0 - confidence + 0.2))), 4)
 
+        PARTIAL_TP_1 = round(0.25 * TAKE_PROFIT_RATIO, 4)
+        PARTIAL_TP_2 = round(0.6 * TAKE_PROFIT_RATIO, 4)
+
         current_position = get_current_position_side(SYMBOL)
         if current_position:
             pnl = get_unrealized_pnl(SYMBOL)
@@ -65,46 +83,49 @@ while True:
 
             trailing_trigger = 0.03
             trailing_drawdown = 0.5
+
             if close_position.peak_profit >= trailing_trigger:
                 stop_threshold = close_position.peak_profit * (1 - trailing_drawdown)
                 if profit_ratio <= stop_threshold:
-                    log(f"[TRAILING-STOP] Profit dropped from {close_position.peak_profit*100:.2f}% to {profit_ratio*100:.2f}% → Closing")
-                    close_position(SYMBOL, current_position)
-                    close_position.peak_profit = 0
-                    time.sleep(60)
+                    handle_close_position("TRAILING-STOP", SYMBOL, current_position, profit_ratio)
                     continue
 
+            qty_open = get_open_position_qty(SYMBOL, current_position)
+            if not PARTIAL_TP_1_DONE and profit_ratio >= PARTIAL_TP_1:
+                close_partial_position(SYMBOL, current_position, qty_open * 0.3)
+                PARTIAL_TP_1_DONE = True
+            if not PARTIAL_TP_2_DONE and profit_ratio >= PARTIAL_TP_2:
+                close_partial_position(SYMBOL, current_position, qty_open * 0.5)
+                PARTIAL_TP_2_DONE = True
+
             if profit_ratio >= TAKE_PROFIT_RATIO:
-                close_position(SYMBOL, current_position)
-                close_position.peak_profit = 0
+                handle_close_position("AUTO-PROFIT", SYMBOL, current_position, profit_ratio)
                 consecutive_losses = 0
                 ENTRY_THRESHOLD = ENTRY_THRESHOLD_BASE
-                log(f"[AUTO-PROFIT] Closed {current_position} with profit {profit_ratio*100:.2f}% (TP {TAKE_PROFIT_RATIO*100:.2f}%)")
-                time.sleep(60)
                 continue
+
             elif profit_ratio <= -LOSS_CUTOFF_RATIO:
-                close_position(SYMBOL, current_position)
-                close_position.peak_profit = 0
+                handle_close_position("AUTO-STOP", SYMBOL, current_position, profit_ratio)
                 consecutive_losses += 1
                 ENTRY_THRESHOLD = min(0.95, ENTRY_THRESHOLD_BASE + consecutive_losses * 0.01)
-                log(f"[AUTO-STOP] Closed {current_position} with loss {profit_ratio*100:.2f}% (SL {LOSS_CUTOFF_RATIO*100:.2f}%)")
-                time.sleep(60)
                 continue
             else:
                 log(f"[INFO] Profit {profit_ratio*100:.2f}% (TP {TAKE_PROFIT_RATIO*100:.2f}%, SL {LOSS_CUTOFF_RATIO*100:.2f}%) → Hold")
 
-        if consecutive_losses >= 2:
+        if consecutive_losses >= 3:
             if trend and ((trend == 'UP' and action != 'LONG') or (trend == 'DOWN' and action != 'SHORT')):
                 log(f"[FILTER] Đang lỗ → chỉ đánh theo trend mạnh, bỏ lệnh ngược")
                 continue
 
         log(f"[INFO] Action: {action} | Confidence: {confidence:.2f} | Price: {price:.4f}")
 
-        breakout_margin = 0.0002
+        BREAKOUT_MARGIN_PERCENT = 0.01
+        breakout_margin = price * BREAKOUT_MARGIN_PERCENT
+
         recent_high = df['high_15m'].iloc[-2] if 'high_15m' in df.columns else None
         recent_low = df['low_15m'].iloc[-2] if 'low_15m' in df.columns else None
 
-        breakout_boost = 0.04
+        breakout_boost = min(0.06, max(0.02, avg_atr / price * 10))
         if action == 'LONG' and recent_high and price > recent_high + breakout_margin and confidence >= ENTRY_THRESHOLD:
             confidence += breakout_boost
             log(f"[BREAKOUT] LONG breakout → Boost confidence lên {confidence:.2f}")
@@ -190,10 +211,7 @@ while True:
                 if close_position.peak_profit >= trailing_trigger:
                     stop_threshold = close_position.peak_profit * (1 - trailing_drawdown)
                     if profit_ratio <= stop_threshold:
-                        log(f"[TRAILING-SWITCH] Profit giảm mạnh từ {close_position.peak_profit*100:.2f}% → đóng lệnh trước khi switch")
-                        close_position(SYMBOL, current_position)
-                        close_position.peak_profit = 0
-                        time.sleep(60)
+                        handle_close_position("TRAILING-SWITCH", SYMBOL, current_position, profit_ratio)
                         continue
 
             if current_position == 'LONG' and action == 'SHORT' and confidence >= SWITCH_THRESHOLD:
