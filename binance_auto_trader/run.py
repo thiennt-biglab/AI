@@ -63,8 +63,9 @@ while True:
         trend = 'UP' if ema_fast and ema_slow and ema_fast > ema_slow else 'DOWN'
 
         base_range = avg_atr / price
-        TAKE_PROFIT_RATIO = round(min(0.05, max(0.015, base_range * (1.0 + confidence))), 4)
-        LOSS_CUTOFF_RATIO = round(min(0.03, max(0.006, base_range * (1.0 - confidence + 0.2))), 4)
+
+        TAKE_PROFIT_RATIO = round(min(0.05, max(0.015, base_range * (1.0 + confidence))) * TP_BUFFER, 4)
+        LOSS_CUTOFF_RATIO = round(min(0.03, max(0.006, base_range * (1.0 - confidence + 0.2))) * SL_BUFFER, 4)
 
         PARTIAL_TP_1 = round(0.25 * TAKE_PROFIT_RATIO, 4)
         PARTIAL_TP_2 = round(0.6 * TAKE_PROFIT_RATIO, 4)
