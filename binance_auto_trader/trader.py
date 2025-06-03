@@ -2,7 +2,6 @@
 from binance.client import Client
 from binance.enums import *
 from config import *
-import pandas as pd
 import numpy as np
 import time
 
@@ -74,6 +73,10 @@ def get_qty_limits(symbol):
     return {"minQty": 0.001, "maxQty": 999999.0, "stepSize": 0.001}
 
 def calculate_qty(balance, price, leverage, risk_percent, symbol=SYMBOL):
+    if price <= 0 or balance <= 0 or leverage <= 0:
+        print(f"[ERROR] Tham số không hợp lệ: balance={balance}, price={price}, leverage={leverage}")
+        return 0.0
+
     capital = balance * (risk_percent / 100)
     limits = get_qty_limits(symbol)
     for attempt in range(5):
@@ -97,9 +100,13 @@ def get_open_position_qty(symbol, side):
     positions = safe_api_call(client.futures_position_information, symbol=symbol, signed=True)
     if not positions:
         return 0.0
+    side_upper = side.upper()
     for pos in positions:
-        if pos['symbol'] == symbol and pos['positionSide'] == side:
-            return abs(float(pos['positionAmt']))
+        try:
+            if pos['symbol'] == symbol and pos['positionSide'] == side_upper:
+                return abs(float(pos['positionAmt']))
+        except Exception as e:
+            print(f"[WARN] Lỗi khi đọc vị trí: {e}")
     return 0.0
 
 def close_position(symbol, side):
@@ -191,7 +198,7 @@ def place_market_order(symbol, side, qty, leverage):
     order = safe_api_call(client.futures_create_order, **order_args)
 
     # Đợi một chút để Binance cập nhật
-    time.sleep(1.5)
+    time.sleep(1.0)
 
     # Lấy lại entry price thực tế
     positions = safe_api_call(client.futures_position_information, symbol=symbol)

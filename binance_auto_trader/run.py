@@ -28,31 +28,25 @@ def log(msg):
 log("[START] Running Binance Futures Auto-Trader with LSTM Strategy")
 consecutive_losses = 0
 ENTRY_THRESHOLD_BASE = ENTRY_THRESHOLD
-last_switch_time = 0  # chống đảo lệnh liên tục
+last_switch_time = 0
 
 while True:
     try:
         df = fetch_features_multi_timeframe()
         scaled_input = preprocess_for_lstm(df)
 
-        try:
-            price = get_realtime_price(SYMBOL)
-            log(f"[DEBUG] Real-time price from Binance: {price}")
-        except Exception as e:
-            log(f"[ERROR] When fetching real-time price: {e.__class__.__name__}: {e}")
-            traceback.print_exc()
+        price = get_realtime_price(SYMBOL)
+        log(f"[DEBUG] Real-time price from Binance: {price}")
 
         atr_cols = [col for col in df.columns if "atr" in col]
         avg_atr = df[atr_cols].iloc[-1].mean()
 
         action, confidence = lstm_based_action(df)
 
-        # === Trend Detection ===
         ema_fast = df['ema_10m'].iloc[-1] if 'ema_10m' in df.columns else None
         ema_slow = df['ema_50m'].iloc[-1] if 'ema_50m' in df.columns else None
         trend = 'UP' if ema_fast and ema_slow and ema_fast > ema_slow else 'DOWN'
 
-        # === Dynamic TP/SL theo ATR và confidence ===
         base_range = avg_atr / price
         TAKE_PROFIT_RATIO = round(min(0.05, max(0.015, base_range * (1.0 + confidence))), 4)
         LOSS_CUTOFF_RATIO = round(min(0.03, max(0.006, base_range * (1.0 - confidence + 0.2))), 4)
@@ -62,7 +56,6 @@ while True:
             pnl = get_unrealized_pnl(SYMBOL)
             balance = get_balance()
             profit_ratio = pnl / balance if balance else 0
-
             log(f"[INFO] Current position: {current_position} | PnL: {pnl:.2f} | Balance: {balance:.2f} | Profit Ratio: {profit_ratio*100:.2f}%")
 
             if not hasattr(close_position, "peak_profit"):
@@ -72,7 +65,6 @@ while True:
 
             trailing_trigger = 0.03
             trailing_drawdown = 0.5
-
             if close_position.peak_profit >= trailing_trigger:
                 stop_threshold = close_position.peak_profit * (1 - trailing_drawdown)
                 if profit_ratio <= stop_threshold:
@@ -101,24 +93,43 @@ while True:
             else:
                 log(f"[INFO] Profit {profit_ratio*100:.2f}% (TP {TAKE_PROFIT_RATIO*100:.2f}%, SL {LOSS_CUTOFF_RATIO*100:.2f}%) → Hold")
 
-        log(f"[INFO] Action: {action} | Confidence: {confidence:.2f} | Price: {price:.4f}")
-        if action != 'HOLD':
+        if consecutive_losses >= 2:
+            if trend and ((trend == 'UP' and action != 'LONG') or (trend == 'DOWN' and action != 'SHORT')):
+                log(f"[FILTER] Đang lỗ → chỉ đánh theo trend mạnh, bỏ lệnh ngược")
+                continue
 
-            # === FILTER: Tránh tín hiệu giả ===
+        log(f"[INFO] Action: {action} | Confidence: {confidence:.2f} | Price: {price:.4f}")
+
+        breakout_margin = 0.0002
+        recent_high = df['high_15m'].iloc[-2] if 'high_15m' in df.columns else None
+        recent_low = df['low_15m'].iloc[-2] if 'low_15m' in df.columns else None
+
+        breakout_boost = 0.04
+        if action == 'LONG' and recent_high and price > recent_high + breakout_margin and confidence >= ENTRY_THRESHOLD:
+            confidence += breakout_boost
+            log(f"[BREAKOUT] LONG breakout → Boost confidence lên {confidence:.2f}")
+        elif action == 'SHORT' and recent_low and price < recent_low - breakout_margin and confidence >= ENTRY_THRESHOLD:
+            confidence += breakout_boost
+            log(f"[BREAKOUT] SHORT breakout → Boost confidence lên {confidence:.2f}")
+
+        if action != 'HOLD':
             if confidence < ENTRY_THRESHOLD:
                 log(f"[FILTER] Confidence {confidence:.2f} < ENTRY_THRESHOLD → Bỏ qua tín hiệu")
                 continue
 
             action_prev, _ = lstm_based_action(df[:-1])
-            if action != action_prev:
-                log(f"[FILTER] Hành vi không ổn định (trước: {action_prev}, hiện tại: {action}) → Bỏ")
+            if action != action_prev and abs(confidence - ENTRY_THRESHOLD) < 0.02:
+                log(f"[FILTER] Hành vi không ổn định + confidence sát ngưỡng → Bỏ")
                 continue
 
             rsi_now = df['rsi_5m'].iloc[-1] if 'rsi_5m' in df.columns else None
             if rsi_now:
-                if (action == 'LONG' and rsi_now < 50) or (action == 'SHORT' and rsi_now > 40):
-                    log(f"[FILTER] RSI ({rsi_now:.2f}) không xác nhận đủ mạnh cho {action} → Bỏ")
-                    continue
+                if (action == 'LONG' and rsi_now < 50):
+                    confidence -= 0.02
+                    log(f"[RSI] LONG nhưng RSI thấp ({rsi_now:.2f}) → giảm confidence: {confidence:.2f}")
+                elif (action == 'SHORT' and rsi_now > 40):
+                    confidence -= 0.02
+                    log(f"[RSI] SHORT nhưng RSI cao ({rsi_now:.2f}) → giảm confidence: {confidence:.2f}")
 
             if trend:
                 if action == 'LONG' and trend != 'UP':
@@ -131,7 +142,9 @@ while True:
             if avg_atr / price < 0.003:
                 log(f"[FILTER] ATR/Price = {avg_atr/price:.4f} < 0.003 → Thị trường quá tĩnh → Bỏ")
                 continue
-            # === END FILTER ===
+            elif 0.003 <= avg_atr / price <= 0.006:
+                log(f"[FILTER] ATR/Price = {avg_atr/price:.4f} → Sideway nguy hiểm, bỏ qua")
+                continue
 
             balance = get_balance()
             init_leverage = select_leverage(confidence)
@@ -159,15 +172,11 @@ while True:
             current_position = get_current_position_side(SYMBOL)
             action_to_take = 'HOLD'
 
-            log(f"[INFO] Current: {current_position} | Action: {action} | Confidence: {confidence:.2f}")
-
-            # === Debounce Switch Delay ===
             if (current_position in ['LONG', 'SHORT']) and (action != current_position) and confidence >= SWITCH_THRESHOLD:
                 if time.time() - last_switch_time < 180:
                     log("[SKIP] Vừa switch gần đây → chờ thêm")
                     continue
 
-            # === Trailing-stop bảo vệ lời trước khi switch ===
             if current_position:
                 pnl = get_unrealized_pnl(SYMBOL)
                 balance = get_balance()

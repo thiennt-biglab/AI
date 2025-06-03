@@ -269,7 +269,7 @@ if __name__ == "__main__":
         avg_trade = np.mean(profits) * 100 if profits else 0
         std_trade = np.std(profits) * 100 if profits else 0
 
-        score = val_acc * 100 - val_loss * 10 + profit * 0.001
+        score = val_acc * 100 - val_loss * 10 + profit * 0.003 + avg_trade * 6 - std_trade * 4
 
         if score > best_score:
             best_score = score
