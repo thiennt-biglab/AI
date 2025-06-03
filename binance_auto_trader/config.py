@@ -15,10 +15,6 @@ TP_MAX = 0.05
 SL_MIN = 0.006
 SL_MAX = 0.03
 
-# Ví dụ: thêm buffer 10% vào SL và TP
-TP_BUFFER = 1.1
-SL_BUFFER = 1.1
-
 NEWS_API_KEY = "b4dc4b3d6c7c4fd6bd0440b3ea507937"  # replace with your key
 QUERY = "crypto OR bitcoin OR ethereum OR fed OR inflation OR binance OR usdt OR usdc OR recession OR war OR conflict OR missile OR Elon Musk OR Powell OR Vitalik OR CZ OR ETF"
 

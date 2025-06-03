@@ -64,6 +64,9 @@ while True:
 
         base_range = avg_atr / price
 
+        TP_BUFFER = 1.1 if base_range > 0.015 else 1.2
+        SL_BUFFER = 1.1 if base_range > 0.015 else 1.3
+
         TAKE_PROFIT_RATIO = round(min(0.05, max(0.015, base_range * (1.0 + confidence))) * TP_BUFFER, 4)
         LOSS_CUTOFF_RATIO = round(min(0.03, max(0.006, base_range * (1.0 - confidence + 0.2))) * SL_BUFFER, 4)
 
@@ -82,8 +85,8 @@ while True:
             if profit_ratio > close_position.peak_profit:
                 close_position.peak_profit = profit_ratio
 
-            trailing_trigger = 0.03
-            trailing_drawdown = 0.5
+            trailing_trigger = 0.02 + confidence * 0.015  # từ 2% đến 3.5%
+            trailing_drawdown = 0.2 + (1 - confidence) * 0.3  # từ 20% đến 50%
 
             if close_position.peak_profit >= trailing_trigger:
                 stop_threshold = close_position.peak_profit * (1 - trailing_drawdown)
