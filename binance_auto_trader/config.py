@@ -3,16 +3,15 @@ API_SECRET = "4iRKlKY9OTYNzY85D1Z4CRIQyq82oX5VCnh6htCT3dHtzsZ5OvGrO3rzuETNRmBg"
 
 SYMBOL = "WIFUSDT"
 INTERVALS = ["5m", "15m", "1h"]  # Multiple timeframes
+SEQ_LEN_MODEL = 25
 DEFAULT_LEVERAGE = 5
-RISK_PERCENT = 10  # % số dư
+RISK_PERCENT = 20  # % số dư
 
 MIN_RSI_LONG = 28
 MAX_RSI_SHORT = 72
-SL_PERCENT = 1.0
-TP_PERCENT = 1.5
 
 SWITCH_THRESHOLD = 0.80
-ENTRY_THRESHOLD = 0.70
+ENTRY_THRESHOLD = 0.75
 
 NEWS_API_KEY = "b4dc4b3d6c7c4fd6bd0440b3ea507937"  # replace with your key
 QUERY = "crypto OR bitcoin OR ethereum OR fed OR inflation OR binance OR usdt OR usdc OR recession OR war OR conflict OR missile OR Elon Musk OR Powell OR Vitalik OR CZ OR ETF"
@@ -32,4 +31,5 @@ KEYWORDS = {
 
 NEWS_URL = "https://newsapi.org/v2/everything"
 TRAINED_MODE_PATH = "lstm_model.keras"
+BEST_MODEL_PATH = "best_model.keras"
 FINE_TUNE_MODEL_PATH = "fined_tune_model.keras"

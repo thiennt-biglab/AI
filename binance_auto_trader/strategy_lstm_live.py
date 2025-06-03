@@ -10,8 +10,6 @@ from config import *
 model = load_model(FINE_TUNE_MODEL_PATH)
 scaler = joblib.load("scaler.pkl")  # optional if saved during training
 
-# Constants
-WINDOW = 30
 FEATURES = [f"{col}_{interval}" for interval in INTERVALS for col in [
     'rsi', 'rsi_diff', 'macd_diff', 'ema_20', 'ema_50', 'atr', 'volume',
     'cci', 'stoch_k', 'stoch_d', 'mom', 'bb_width',
@@ -26,7 +24,7 @@ def preprocess_for_lstm(df: pd.DataFrame) -> np.ndarray:
 
 
 def lstm_based_action(df_combined):
-    X_raw = df_combined.iloc[-30:]  # Giữ nguyên DataFrame và tên cột
+    X_raw = df_combined.iloc[-SEQ_LEN_MODEL:]  # Giữ nguyên DataFrame và tên cột
     X_scaled = scaler.transform(X_raw)
     X_input = np.expand_dims(X_scaled, axis=0)
 

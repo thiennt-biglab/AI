@@ -32,19 +32,13 @@ def safe_api_call(api_func, *args, signed=False, **kwargs):
     return None
 
 
-
-def get_latest_klines(symbol, interval, limit=200):
-    klines = safe_api_call(client.futures_klines, symbol=symbol, interval=interval, limit=limit)
-    if klines is None:
-        return pd.DataFrame()
-    df = pd.DataFrame(klines, columns=[
-        'timestamp','open','high','low','close','volume',
-        'close_time','quote_asset_volume','num_trades',
-        'taker_buy_base','taker_buy_quote','ignore'
-    ])
-    df[['open', 'high', 'low', 'close', 'volume']] = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-    return df
+def get_realtime_price(symbol):
+    try:
+        ticker = safe_api_call(client.futures_symbol_ticker, symbol=symbol)
+        return float(ticker['price']) if ticker else None
+    except Exception as e:
+        print(f"[ERROR] Failed to get realtime price: {e}")
+        return None
 
 def get_step_size(symbol):
     exchange_info = safe_api_call(client.futures_exchange_info)
@@ -142,18 +136,23 @@ def get_unrealized_pnl(symbol):
             return float(pos['unRealizedProfit'])
     return 0.0
 
-def cancel_open_orders(symbol, position_side):
+def cancel_open_orders(symbol, position_side='BOTH'):
     open_orders = safe_api_call(client.futures_get_open_orders, symbol=symbol)
     if not open_orders:
         print(f"[WARN] Không thể lấy danh sách lệnh để huỷ.")
         return
+
     count = 0
     for o in open_orders:
-        if o['type'] in ['STOP_MARKET', 'TAKE_PROFIT_MARKET'] and o.get('positionSide', '') == position_side:
+        o_pos_side = o.get('positionSide', 'BOTH')
+        if o['type'] in ['STOP_MARKET', 'TAKE_PROFIT_MARKET'] and (position_side == 'BOTH' or o_pos_side == position_side):
             result = safe_api_call(client.futures_cancel_order, symbol=symbol, orderId=o['orderId'])
             if result:
+                print(f"[INFO] Đã huỷ lệnh {o['type']} - ID {o['orderId']} - Side {o_pos_side}")
                 count += 1
-    print(f"[INFO] Canceled {count} open stop/TP orders for {position_side}")
+
+    print(f"[INFO] Tổng số lệnh STOP/TP đã huỷ cho {position_side}: {count}")
+
 
 def get_current_position_side(symbol):
     positions = safe_api_call(client.futures_position_information, symbol=symbol, signed=True)
@@ -190,29 +189,30 @@ def place_market_order(symbol, side, qty, leverage):
 
     return safe_api_call(client.futures_create_order, **order_args)
 
-def place_sl_tp_order(symbol, side, qty, entry_price):
-    sl_price = entry_price * (1 - SL_PERCENT/100) if side == 'LONG' else entry_price * (1 + SL_PERCENT/100)
-    tp_price = entry_price * (1 + TP_PERCENT/100) if side == 'LONG' else entry_price * (1 - TP_PERCENT/100)
+def place_sl_tp_order(symbol, side, qty, entry_price, tp_ratio, sl_ratio):
+    sl_price = entry_price * (1 - sl_ratio) if side == 'LONG' else entry_price * (1 + sl_ratio)
+    tp_price = entry_price * (1 + tp_ratio) if side == 'LONG' else entry_price * (1 - tp_ratio)
     position_side = 'LONG' if side == 'LONG' else 'SHORT'
 
     sl_order = safe_api_call(client.futures_create_order,
-        symbol=symbol,
-        side=SIDE_SELL if side == 'LONG' else SIDE_BUY,
-        type=ORDER_TYPE_STOP_MARKET,
-        stopPrice=round(sl_price, 2),
-        closePosition=True,
-        positionSide=position_side,
-        timeInForce=TIME_IN_FORCE_GTC
-    )
+                             symbol=symbol,
+                             side=SIDE_SELL if side == 'LONG' else SIDE_BUY,
+                             type=ORDER_TYPE_STOP_MARKET,
+                             stopPrice=round(sl_price, 5),
+                             closePosition=True,
+                             positionSide=position_side,
+                             timeInForce=TIME_IN_FORCE_GTC
+                             )
 
     tp_order = safe_api_call(client.futures_create_order,
-        symbol=symbol,
-        side=SIDE_SELL if side == 'LONG' else SIDE_BUY,
-        type=ORDER_TYPE_TAKE_PROFIT_MARKET,
-        stopPrice=round(tp_price, 2),
-        closePosition=True,
-        positionSide=position_side,
-        timeInForce=TIME_IN_FORCE_GTC
-    )
+                             symbol=symbol,
+                             side=SIDE_SELL if side == 'LONG' else SIDE_BUY,
+                             type=ORDER_TYPE_TAKE_PROFIT_MARKET,
+                             stopPrice=round(tp_price, 5),
+                             closePosition=True,
+                             positionSide=position_side,
+                             timeInForce=TIME_IN_FORCE_GTC
+                             )
 
-    return sl_order
+    return sl_order, tp_order
+

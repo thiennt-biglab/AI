@@ -12,6 +12,11 @@ model = load_model(FINE_TUNE_MODEL_PATH)
 scaler = joblib.load("scaler.pkl")
 X_seq, y_seq, close_prices = joblib.load("lstm_data.pkl")  # từ lúc training đã lưu
 
+if X_seq.shape[1] > SEQ_LEN_MODEL:
+    X_seq = X_seq[:, -SEQ_LEN_MODEL:, :]
+elif X_seq.shape[1] < SEQ_LEN_MODEL:
+    raise ValueError(f"X_seq có độ dài {X_seq.shape[1]} nhỏ hơn SEQ_LEN_MODEL={SEQ_LEN_MODEL}")
+
 # Dự đoán
 y_pred_proba = model.predict(X_seq)
 y_pred = np.argmax(y_pred_proba, axis=1)
@@ -36,17 +41,19 @@ plt.title('Confusion Matrix for LSTM Model')
 plt.tight_layout()
 plt.savefig("confusion_matrix.png")
 
+# === Backtest ===
 capital = 1000
 balance = capital
 position = None
 entry_price = 0
 fee_rate = 0.0004  # 0.04%
+equity_curve = [capital]
+TP = 0.01  # 1%
+SL = 0.005  # 0.5%
 
-for i in range(1, len(X_seq)):
-    price_now = close_prices[i]    # giả định close là [0]
+for i in range(1, len(X_seq) - 3):
+    price_now = close_prices[i]
     pred = y_pred[i]
-    prev_pred = y_pred[i-1]
-
 
     if position is None:
         if pred == 1:  # LONG
@@ -56,19 +63,49 @@ for i in range(1, len(X_seq)):
             position = 'SHORT'
             entry_price = price_now
     else:
-        if (position == 'LONG' and pred != 1) or (position == 'SHORT' and pred != 2):
-            trade_value = balance
-            fee = trade_value * fee_rate
-
+        exit = False
+        for j in range(1, 4):
+            future_price = close_prices[i + j]
             if position == 'LONG':
-                pnl = (price_now - entry_price) / entry_price
+                change = (future_price - entry_price) / entry_price
             else:
-                pnl = (entry_price - price_now) / entry_price
+                change = (entry_price - future_price) / entry_price
 
-            profit = trade_value * pnl
-            balance += profit - 2 * fee
-            position = None
+            if change >= TP:
+                pnl = TP
+                exit = True
+                break
+            elif change <= -SL:
+                pnl = -SL
+                exit = True
+                break
+
+        if not exit:
+            final_price = close_prices[i + 3]
+            if position == 'LONG':
+                pnl = (final_price - entry_price) / entry_price
+            else:
+                pnl = (entry_price - final_price) / entry_price
+
+        trade_value = balance
+        fee = trade_value * fee_rate
+        profit = trade_value * pnl
+        balance += profit - 2 * fee
+        position = None
+
+    equity_curve.append(balance)
 
 final_profit = balance - capital
 print(f"\n🧪 Final capital: ${balance:.2f} (profit: ${final_profit:.2f})")
 
+# Vẽ Equity Curve
+plt.figure(figsize=(10, 4))
+plt.plot(equity_curve, label="Equity Curve")
+plt.title("Equity Curve over Backtest")
+plt.xlabel("Trades")
+plt.ylabel("Capital ($)")
+plt.grid(True)
+plt.legend()
+plt.tight_layout()
+plt.savefig("equity_curve.png")
+plt.show()

@@ -1,6 +1,6 @@
 import numpy as np
 from binance.client import Client
-from config import API_KEY, API_SECRET, SYMBOL, INTERVALS
+from config import API_KEY, API_SECRET, SYMBOL, INTERVALS, BEST_MODEL_PATH, SEQ_LEN_MODEL
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, GRU, Bidirectional, Dense, Dropout, Input, MultiHeadAttention, LayerNormalization, GlobalAveragePooling1D, Add
 from tensorflow.keras.callbacks import ReduceLROnPlateau, EarlyStopping
@@ -11,6 +11,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.utils.class_weight import compute_class_weight
 from tensorflow.keras.layers import Conv1D, MaxPooling1D
 import joblib
+from collections import Counter
 from feature_pipeline import fetch_features_multi_timeframe
 
 client = Client(API_KEY, API_SECRET)
@@ -21,17 +22,38 @@ scaler = StandardScaler()
 X = scaler.fit_transform(df)
 joblib.dump(scaler, "scaler.pkl")
 
-future_return = df[f'ema_20_{INTERVALS[0]}'].shift(-3) / df[f'ema_20_{INTERVALS[0]}'] - 1
-labels = np.zeros(len(future_return))
-labels[future_return > 0.003] = 1  # LONG
-labels[future_return < -0.003] = 2  # SHORT
+ema = df[f'ema_20_{INTERVALS[0]}'].values
+atr = df['atr_5m'].values  # Cột ATR phải có trong feature_pipeline
+labels = np.zeros(len(ema))
+future_window = 5  # số nến tương lai để kiểm tra TP/SL
 
-valid_idx = ~np.isnan(future_return)
+for i in range(len(ema) - future_window):
+    entry_price = ema[i]
+    if atr[i] / entry_price < 0.001:
+        continue
+    tp_ratio = atr[i] / entry_price * 1.5  # TP = 1.5 * ATR
+    sl_ratio = atr[i] / entry_price * 1.0  # SL = 1.0 * ATR
+    future_prices = ema[i+1:i+1+future_window]
+
+    for price in future_prices:
+        if price >= entry_price * (1 + tp_ratio):
+            labels[i] = 1  # LONG
+            break
+        elif price <= entry_price * (1 - sl_ratio):
+            labels[i] = 2  # SHORT
+            break
+
+print(Counter(labels.astype(int)))
+
+# Loại bỏ các sample quá gần cuối vì không đủ future_window
+valid_idx = np.arange(len(labels) - future_window)
+
 X = X[valid_idx]
 labels = labels[valid_idx]
 
+
 X_seq, y_seq = [], []
-window = 30
+window = SEQ_LEN_MODEL
 for i in range(window, len(X)):
     X_seq.append(X[i - window:i])
     y_seq.append(labels[i])
@@ -166,11 +188,16 @@ models = {
     "gru": build_model_gru(),
     "bilstm": build_model_bilstm(),
     "lstm_attn": build_model_lstm_attention(),
-    "cnn_lstm": build_cnn_lstm_model()
+    "cnn_lstm": build_cnn_lstm_model(),
+    "transformer_encoder": build_transformer_encoder_model()
 }
 
 if __name__ == "__main__":
+
     results = []
+    best_model = None
+    best_name = ""
+    best_score = -np.inf
 
     for name, model in models.items():
         print(f"\nTraining model: {name}")
@@ -187,12 +214,13 @@ if __name__ == "__main__":
             verbose=0
         )
         val_acc = max(history.history['val_accuracy'])
+        val_loss = min(history.history['val_loss'])
 
         y_pred = model.predict(X_seq, verbose=0)
         y_class = np.argmax(y_pred, axis=1)
 
         close_prices = df[f"ema_20_{INTERVALS[0]}"].values
-        close_prices = close_prices[~np.isnan(future_return)][window:]
+        close_prices = close_prices[-len(X_seq):]
 
         capital = 60
         TP = 0.01   # 1% Take Profit
@@ -240,4 +268,17 @@ if __name__ == "__main__":
         profit = capital - 60
         avg_trade = np.mean(profits) * 100 if profits else 0
         std_trade = np.std(profits) * 100 if profits else 0
-        print(f"{name} | Val Accuracy: {val_acc:.4f} | Profit: ${profit:.2f} | Avg Trade: {avg_trade:.3f}% | Std: {std_trade:.3f}%")
+
+        score = val_acc * 100 - val_loss * 10 + profit
+
+        if score > best_score:
+            best_score = score
+            best_model = model
+            best_name = name
+
+        print(f"{name} | Val Accuracy: {val_acc:.4f} | Profit: ${profit:.2f} | Score: {score} | Avg Trade: {avg_trade:.3f}% | Std: {std_trade:.3f}%")
+
+    if best_model:
+        print(f"\n✅ Best model: {best_name} | Score: {best_score:.2f}")
+    best_model.save(BEST_MODEL_PATH)
+    print(f"✅ Model saved to best_model.keras")
