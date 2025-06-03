@@ -1,0 +1,11 @@
+/binance_auto_trader/lstm_data.pkl
+/binance_auto_trader/lstm_data_new.pkl
+/binance_auto_trader/scaler_new.pkl
+/binance_auto_trader/trade_log.csv
+/binance_auto_trader/cache/
+/binance_auto_trader/models/
+/binance_auto_trader/*.keras
+/binance_auto_trader/*.png
+/binance_auto_trader/*.csv
+/binance_auto_trader/*.pkl
+/binance_auto_trader/.venv/
