@@ -8,12 +8,12 @@ from config import *
 
 # --- Cấu hình ---
 LABELS = {0: 'HOLD', 1: 'LONG', 2: 'SHORT'}
-PREDICT_HORIZON = 5
+PREDICT_HORIZON = FUTURE_WINDOW
 DATA_PATH = "lstm_data.pkl"
 OUTPUT_CSV = "misclassified_trades.csv"
 
 # --- Load dữ liệu ---
-X_seq, y_seq, close_prices = joblib.load(DATA_PATH)
+X_seq, y_seq, close_prices, high_prices, low_prices = joblib.load(DATA_PATH)
 
 if X_seq.shape[1] > SEQ_LEN_MODEL:
     X_seq = X_seq[:, -SEQ_LEN_MODEL:, :]
@@ -21,8 +21,8 @@ elif X_seq.shape[1] < SEQ_LEN_MODEL:
     raise ValueError(f"X_seq có độ dài {X_seq.shape[1]} nhỏ hơn SEQ_LEN_MODEL={SEQ_LEN_MODEL}")
 
 split_idx = int(len(X_seq) * 0.8)
-
 X_test = X_seq[split_idx:]
+
 y_test_raw = y_seq[split_idx:]
 close_prices_test = close_prices[split_idx:]
 y_test = to_categorical(y_test_raw, num_classes=3)

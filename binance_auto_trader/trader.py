@@ -5,13 +5,6 @@ from config import *
 import numpy as np
 import time
 
-ORDER_TYPE_STOP_MARKET = "STOP_MARKET"
-ORDER_TYPE_TAKE_PROFIT_MARKET = "TAKE_PROFIT_MARKET"
-ORDER_TYPE_MARKET = "MARKET"
-TIME_IN_FORCE_GTC = "GTC"
-SIDE_BUY = "BUY"
-SIDE_SELL = "SELL"
-
 client = Client(API_KEY, API_SECRET)
 
 def safe_api_call(api_func, *args, signed=False, **kwargs):
@@ -95,6 +88,14 @@ def calculate_qty(balance, price, leverage, risk_percent, symbol=SYMBOL):
             return qty
     print("[ERROR] Không thể tìm được leverage phù hợp để có qty hợp lệ.")
     return 0.0
+
+def get_entry_price(symbol):
+    positions = client.futures_position_information(symbol=symbol)
+    for pos in positions:
+        if float(pos["positionAmt"]) != 0:
+            return float(pos["entryPrice"])
+    return None
+
 
 def get_open_position_qty(symbol, side):
     positions = safe_api_call(client.futures_position_information, symbol=symbol, signed=True)

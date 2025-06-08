@@ -10,7 +10,7 @@ from config import *
 # Load model và dữ liệu đã lưu
 model = load_model(FINE_TUNE_MODEL_PATH)
 scaler = joblib.load("scaler.pkl")
-X_seq, y_seq, close_prices = joblib.load("lstm_data.pkl")  # từ lúc training đã lưu
+X_seq, y_seq, close_prices, high_prices, low_prices = joblib.load("lstm_data.pkl")  # từ lúc training đã lưu
 
 # Adjust sequence length for compatibility
 EXPECTED_SEQ_LEN = model.input_shape[1]
@@ -45,89 +45,80 @@ plt.tight_layout()
 plt.savefig("confusion_matrix.png")
 
 # === Backtest ===
-capital = 1000
-balance = capital
-position = None
-entry_price = 0
-fee_rate = 0.0004  # 0.04%
-equity_curve = [capital]
-TP = 0.02  # 2%
-SL = 0.01  # 1%
-win_count = 0
-lose_count = 0
+y_pred = model.predict(X_seq, verbose=0)
+y_class = np.argmax(y_pred, axis=1)
 
-i = 1
-while i < len(X_seq) - 3:
-    price_now = close_prices[i]
-    pred = y_pred[i]
 
-    # Bỏ qua tín hiệu yếu
-    if np.max(y_pred_proba[i]) < 0.6:
-        equity_curve.append(balance)
-        i += 1
-        continue
+future_window = FUTURE_WINDOW + 10
+capital = 60
+TP = 0.01   # 1% Take Profit
+SL = 0.015  # 0.5% Stop Loss
+profits = []
+FEE = 0.0007
+wins = 0
+total_trades = 0
+fixed_trade_size = 0.5 * capital
+for i in range(len(y_class) - future_window):
+    pred = y_class[i]
+    price_entry = close_prices[i]
 
-    if position is None:
-        if pred == 1:  # LONG
-            position = 'LONG'
-            entry_price = price_now
-        elif pred == 2:  # SHORT
-            position = 'SHORT'
-            entry_price = price_now
-    else:
-        exit = False
-        for j in range(1, 4):
-            future_price = close_prices[i + j]
-            if position == 'LONG':
-                change = (future_price - entry_price) / entry_price
-            else:
-                change = (entry_price - future_price) / entry_price
+    if pred == 1:  # LONG
+        tp_price = price_entry * (1 + TP)
+        sl_price = price_entry * (1 - SL)
+        highs = high_prices[i+1:i+future_window+1]
+        lows = low_prices[i+1:i+future_window+1]
 
-            if change >= TP:
-                pnl = TP
-                win_count += 1
-                exit = True
-                break
-            elif change <= -SL:
-                pnl = -SL
-                lose_count += 1
-                exit = True
-                break
+        hit_tp = np.any(highs >= tp_price)
+        hit_sl = np.any(lows <= sl_price)
 
-        if not exit:
-            final_price = close_prices[i + 3]
-            if position == 'LONG':
-                pnl = (final_price - entry_price) / entry_price
-            else:
-                pnl = (entry_price - final_price) / entry_price
-            if pnl > 0:
-                win_count += 1
-            else:
-                lose_count += 1
+        if hit_tp and (not hit_sl or np.argmax(highs >= tp_price) <= np.argmax(lows <= sl_price)):
+            net = TP - FEE
+            capital += fixed_trade_size * net
+            profits.append(net)
+            wins += 1
+        elif hit_sl:
+            net = -SL - FEE
+            capital += fixed_trade_size * net
+            profits.append(net)
+        else:
+            price_exit = close_prices[i + future_window]
+            change = (price_exit - price_entry) / price_entry - FEE
+            capital += fixed_trade_size * change
+            profits.append(change)
+            if change > 0:
+                wins += 1
+        total_trades += 1
 
-        trade_value = balance
-        fee = trade_value * fee_rate
-        profit = trade_value * pnl
-        balance += profit - fee  # chỉ tính 1 chiều phí để dễ phân tích
-        position = None
-        i += 3  # skip future bars đã dùng
-        equity_curve.append(balance)
-        continue
+    elif pred == 2:  # SHORT
+        tp_price = price_entry * (1 - TP)
+        sl_price = price_entry * (1 + SL)
+        highs = high_prices[i+1:i+future_window+1]
+        lows = low_prices[i+1:i+future_window+1]
 
-    equity_curve.append(balance)
-    i += 1
+        hit_tp = np.any(lows <= tp_price)
+        hit_sl = np.any(highs >= sl_price)
 
-final_profit = balance - capital
-print(f"\n\U0001F9EA Final capital: ${balance:.2f} (profit: ${final_profit:.2f})")
-print(f"✅ Tổng lệnh thắng: {win_count}, ❌ Lệnh thua: {lose_count}, 📉 Winrate: {win_count / (win_count + lose_count + 1e-9):.2%}")
+        if hit_tp and (not hit_sl or np.argmax(lows <= tp_price) <= np.argmax(highs >= sl_price)):
+            net = TP - FEE
+            capital += fixed_trade_size * net
+            profits.append(net)
+            wins += 1
+        elif hit_sl:
+            net = -SL - FEE
+            capital += fixed_trade_size * net
+            profits.append(net)
+        else:
+            price_exit = close_prices[i + future_window]
+            change = (price_entry - price_exit) / price_entry - FEE
+            capital += fixed_trade_size * change
+            profits.append(change)
+            if change > 0:
+                wins += 1
+        total_trades += 1
 
-# Vẽ Equity Curve
-plt.figure(figsize=(10, 4))
-plt.plot(equity_curve, label="Equity Curve")
-plt.title("Equity Curve over Backtest")
-plt.xlabel("Trades")
-plt.ylabel("Capital ($)")
-plt.grid(True)
-plt.legend()
-plt.tight_layout()
-plt.savefig("equity_curve.png")
+profit = capital - 60
+avg_trade = np.mean(profits) * 100 if profits else 0
+std_trade = np.std(profits) * 100 if profits else 0
+winrate = (wins / total_trades * 100) if total_trades > 0 else 0
+
+print(f"Profit: ${profit:.2f} | Winrate: {winrate:.2f}% | Avg Trade: {avg_trade:.3f}% | Std: {std_trade:.3f}%")

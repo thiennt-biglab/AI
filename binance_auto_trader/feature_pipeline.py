@@ -76,6 +76,7 @@ def fetch_features_multi_timeframe():
             df['rsi_diff'] = df['rsi'].diff()
             macd = ta.trend.MACD(df['close'])
             df['macd_diff'] = macd.macd_diff()
+            df['ema_9'] = ta.trend.EMAIndicator(df['close'], window=9).ema_indicator()
             df['ema_20'] = ta.trend.EMAIndicator(df['close'], window=20).ema_indicator()
             df['ema_50'] = ta.trend.EMAIndicator(df['close'], window=50).ema_indicator()
             df['atr'] = ta.volatility.AverageTrueRange(df['high'], df['low'], df['close']).average_true_range()
@@ -102,6 +103,9 @@ def fetch_features_multi_timeframe():
             df['upper_to_range'] = df['upper_shadow'] / df['candle_range'].replace(0, np.nan)
             df['lower_to_range'] = df['lower_shadow'] / df['candle_range'].replace(0, np.nan)
 
+            df['high'] = df['high'].astype(float)
+            df['low'] = df['low'].astype(float)
+
         except Exception as e:
             print(f"[ERROR] Failed to compute indicators for {interval}: {e}")
             continue
@@ -109,7 +113,8 @@ def fetch_features_multi_timeframe():
         df.dropna(inplace=True)
 
         required_cols = [
-            'rsi', 'rsi_diff', 'macd_diff', 'ema_20', 'ema_50', 'atr', 'volume',
+            'open', 'high', 'low', 'close',
+            'rsi', 'rsi_diff', 'macd_diff', 'ema_9', 'ema_20', 'ema_50', 'atr', 'volume',
             'cci', 'stoch_k', 'stoch_d', 'mom', 'bb_width',
             'volume_change', 'volume_ema', 'volume_ratio',
             'candle_body', 'candle_range', 'upper_shadow', 'lower_shadow',
@@ -143,7 +148,8 @@ def fetch_features_multi_timeframe():
     try:
         combined['sentiment'] = analyze_news()
         combined['btc_dominance'] = get_btc_dominance()
-        combined['dxy'] = get_dxy()
+        dxy_value = get_dxy()
+        combined['dxy'] = dxy_value if dxy_value else combined["dxy"].mean()
         combined['funding_rate'] = get_funding_rate(SYMBOL)
     except Exception as e:
         print(f"[WARN] Failed to fetch external features: {e}")

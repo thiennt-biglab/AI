@@ -11,7 +11,7 @@ from config import *
 
 # === Step 1: Load data ===
 df_misclassified = pd.read_csv("misclassified_trades.csv")
-X_seq, y_seq, close_prices = joblib.load("lstm_data.pkl")
+X_seq, y_seq, close_prices, high_prices, low_prices = joblib.load("lstm_data.pkl")
 
 # Adjust input sequence length to match SEQ_LEN_MODEL for training
 if X_seq.shape[1] > SEQ_LEN_MODEL:

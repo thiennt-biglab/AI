@@ -1,6 +1,6 @@
 import numpy as np
 from binance.client import Client
-from config import API_KEY, API_SECRET, SYMBOL, INTERVALS, BEST_MODEL_PATH, SEQ_LEN_MODEL
+from config import *
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, GRU, Bidirectional, Dense, Dropout, Input, MultiHeadAttention, LayerNormalization, GlobalAveragePooling1D, Add
 from tensorflow.keras.callbacks import ReduceLROnPlateau, EarlyStopping
@@ -23,25 +23,42 @@ X = scaler.fit_transform(df)
 joblib.dump(scaler, "scaler.pkl")
 
 ema = df[f'ema_20_{INTERVALS[0]}'].values
-atr = df['atr_5m'].values  # Cột ATR phải có trong feature_pipeline
-labels = np.zeros(len(ema))
-future_window = 5  # số nến tương lai để kiểm tra TP/SL
+close = df[f'close_{INTERVALS[0]}'].values
+atr = df['atr_5m'].values
+future_window = FUTURE_WINDOW  # số nến tương lai để kiểm tra TP/SL
 
-for i in range(len(ema) - future_window):
-    entry_price = ema[i]
-    if atr[i] / entry_price < 0.001:
-        continue
-    tp_ratio = atr[i] / entry_price * 1.5  # TP = 1.5 * ATR
-    sl_ratio = atr[i] / entry_price * 1.0  # SL = 1.0 * ATR
-    future_prices = ema[i+1:i+1+future_window]
+window = SEQ_LEN_MODEL# mặc định là HOLD
+labels = np.zeros(len(future_return))
 
-    for price in future_prices:
-        if price >= entry_price * (1 + tp_ratio):
+high_prices = df[f"high_{INTERVALS[0]}"].values
+low_prices = df[f"low_{INTERVALS[0]}"].values
+close_prices = df[f"close_{INTERVALS[0]}"].values
+volatility = df[f"atr_{INTERVALS[0]}"] / close_prices
+threshold = np.clip(volatility * 1.5, 0.003, 0.008)  # giữ TP/SL nằm trong 0.3%–0.8%
+trend_filter = df[f"ema_9_{INTERVALS[0]}"] > df[f"ema_20_{INTERVALS[0]}"]
+
+# Gán nhãn dựa vào TP/SL trong tương lai
+for i in range(len(df) - future_window):
+    entry_price = close_prices[i]
+    tp = entry_price * (1 + threshold[i])
+    sl = entry_price * (1 - threshold[i])
+
+    future_highs = high_prices[i+1:i+1+future_window]
+    future_lows = low_prices[i+1:i+1+future_window]
+
+    if trend_filter.iloc[i]:  # Ưu tiên LONG khi trend tăng
+        if np.any(future_highs >= tp):
             labels[i] = 1  # LONG
-            break
-        elif price <= entry_price * (1 - sl_ratio):
+        elif np.any(future_lows <= sl):
+            labels[i] = 0  # HOLD
+    else:  # Ưu tiên SHORT khi trend giảm
+        if np.any(future_lows <= sl):
             labels[i] = 2  # SHORT
-            break
+        elif np.any(future_highs >= tp):
+            labels[i] = 0  # HOLD
+
+# Loại bỏ phần cuối thiếu tương lai
+labels = labels[:-future_window]
 
 print(Counter(labels.astype(int)))
 
@@ -53,11 +70,10 @@ labels = labels[valid_idx]
 
 
 X_seq, y_seq = [], []
-window = SEQ_LEN_MODEL
+
 for i in range(window, len(X)):
     X_seq.append(X[i - window:i])
     y_seq.append(labels[i])
-close_prices = df['ema_20_5m'].values[window:]
 
 X_seq = np.array(X_seq)
 y_seq = np.array(y_seq)
@@ -146,19 +162,6 @@ def build_model_lstm_attention():
     model.compile(optimizer='adam', loss=CategoricalCrossentropy(label_smoothing=0.05), metrics=['accuracy'])
     return model
 
-def build_cnn_lstm_model():
-    model = Sequential([
-        Input(shape=(X_train.shape[1], X_train.shape[2])),
-        Conv1D(filters=64, kernel_size=3, activation='relu'),
-        MaxPooling1D(pool_size=2),
-        LSTM(64),
-        Dense(64, activation='relu'),
-        Dropout(0.3),
-        Dense(3, activation='softmax')
-    ])
-    model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
-    return model
-
 def build_transformer_encoder_model():
     from tensorflow.keras.models import Model
     from tensorflow.keras.layers import LayerNormalization, MultiHeadAttention, Input, Dense, Dropout, GlobalAveragePooling1D, Add
@@ -188,9 +191,10 @@ models = {
     "gru": build_model_gru(),
     "bilstm": build_model_bilstm(),
     "lstm_attn": build_model_lstm_attention(),
-    "cnn_lstm": build_cnn_lstm_model(),
     "transformer_encoder": build_transformer_encoder_model()
 }
+
+joblib.dump((X_seq, y_seq, close, high_prices, low_prices), "lstm_data.pkl")
 
 if __name__ == "__main__":
 
@@ -211,7 +215,7 @@ if __name__ == "__main__":
                 ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5),
                 EarlyStopping(monitor='val_loss', patience=15, restore_best_weights=True)
             ],
-            verbose=0
+            verbose=1
         )
         val_acc = max(history.history['val_accuracy'])
         val_loss = min(history.history['val_loss'])
@@ -219,66 +223,90 @@ if __name__ == "__main__":
         y_pred = model.predict(X_seq, verbose=0)
         y_class = np.argmax(y_pred, axis=1)
 
-        close_prices = df[f"ema_20_{INTERVALS[0]}"].values
-        close_prices = close_prices[-len(X_seq):]
+        close_prices = close[-len(X_seq):]
 
         capital = 60
         TP = 0.01   # 1% Take Profit
         SL = 0.005  # 0.5% Stop Loss
         profits = []
-
-        for i in range(len(y_class) - 3):
+        FEE = 0.0007
+        wins = 0
+        total_trades = 0
+        fixed_trade_size = 0.5 * capital
+        for i in range(len(y_class) - future_window):
             pred = y_class[i]
             price_entry = close_prices[i]
 
             if pred == 1:  # LONG
-                for j in range(1, 4):
-                    price_now = close_prices[i + j]
-                    change = (price_now - price_entry) / price_entry
-                    if change >= TP:
-                        capital *= (1 + TP)
-                        profits.append(TP)
-                        break
-                    elif change <= -SL:
-                        capital *= (1 - SL)
-                        profits.append(-SL)
-                        break
+                tp_price = price_entry * (1 + TP)
+                sl_price = price_entry * (1 - SL)
+                highs = high_prices[i+1:i+future_window+1]
+                lows = low_prices[i+1:i+future_window+1]
+
+                hit_tp = np.any(highs >= tp_price)
+                hit_sl = np.any(lows <= sl_price)
+
+                if hit_tp and (not hit_sl or np.argmax(highs >= tp_price) <= np.argmax(lows <= sl_price)):
+                    net = TP - FEE
+                    capital += fixed_trade_size * net
+                    profits.append(net)
+                    wins += 1
+                elif hit_sl:
+                    net = -SL - FEE
+                    capital += fixed_trade_size * net
+                    profits.append(net)
                 else:
-                    change = (close_prices[i + 3] - price_entry) / price_entry
-                    capital *= (1 + change)
+                    price_exit = close_prices[i + future_window]
+                    change = (price_exit - price_entry) / price_entry - FEE
+                    capital += fixed_trade_size * change
                     profits.append(change)
+                    if change > 0:
+                        wins += 1
+                total_trades += 1
 
             elif pred == 2:  # SHORT
-                for j in range(1, 4):
-                    price_now = close_prices[i + j]
-                    change = (price_entry - price_now) / price_entry
-                    if change >= TP:
-                        capital *= (1 + TP)
-                        profits.append(TP)
-                        break
-                    elif change <= -SL:
-                        capital *= (1 - SL)
-                        profits.append(-SL)
-                        break
+                tp_price = price_entry * (1 - TP)
+                sl_price = price_entry * (1 + SL)
+                highs = high_prices[i+1:i+future_window+1]
+                lows = low_prices[i+1:i+future_window+1]
+
+                hit_tp = np.any(lows <= tp_price)
+                hit_sl = np.any(highs >= sl_price)
+
+                if hit_tp and (not hit_sl or np.argmax(lows <= tp_price) <= np.argmax(highs >= sl_price)):
+                    net = TP - FEE
+                    capital += fixed_trade_size * net
+                    profits.append(net)
+                    wins += 1
+                elif hit_sl:
+                    net = -SL - FEE
+                    capital += fixed_trade_size * net
+                    profits.append(net)
                 else:
-                    change = (price_entry - close_prices[i + 3]) / price_entry
-                    capital *= (1 + change)
+                    price_exit = close_prices[i + future_window]
+                    change = (price_entry - price_exit) / price_entry - FEE
+                    capital += fixed_trade_size * change
                     profits.append(change)
+                    if change > 0:
+                        wins += 1
+                total_trades += 1
 
         profit = capital - 60
         avg_trade = np.mean(profits) * 100 if profits else 0
         std_trade = np.std(profits) * 100 if profits else 0
+        winrate = (wins / total_trades * 100) if total_trades > 0 else 0
 
-        score = val_acc * 100 - val_loss * 10 + profit * 0.003 + avg_trade * 6 - std_trade * 4
+        score = val_acc * 100 - val_loss * 10 + avg_trade * 4 - std_trade * 6 + winrate
 
         if score > best_score:
             best_score = score
             best_model = model
             best_name = name
 
-        print(f"{name} | Val Accuracy: {val_acc:.4f} | Profit: ${profit:.2f} | Score: {score} | Avg Trade: {avg_trade:.3f}% | Std: {std_trade:.3f}%")
+        print(f"{name} | Val Accuracy: {val_acc:.4f} | Profit: ${profit:.2f} | Winrate: {winrate:.2f}% | "
+              f"Score: {score:.2f} | Avg Trade: {avg_trade:.3f}% | Std: {std_trade:.3f}%")
 
     if best_model:
         print(f"\n✅ Best model: {best_name} | Score: {best_score:.2f}")
-    best_model.save(BEST_MODEL_PATH)
-    print(f"✅ Model saved to best_model.keras")
+        best_model.save(BEST_MODEL_PATH)
+        print(f"✅ Model saved to best_model.keras")

@@ -10,7 +10,8 @@ from trader import (
     get_unrealized_pnl,
     get_realtime_price,
     get_open_position_qty,
-    close_partial_position
+    close_partial_position,
+    get_entry_price
 )
 from feature_pipeline import fetch_features_multi_timeframe
 from strategy_lstm_live import (
@@ -64,20 +65,39 @@ while True:
 
         base_range = avg_atr / price
 
-        TP_BUFFER = 1.1 if base_range > 0.015 else 1.2
-        SL_BUFFER = 1.1 if base_range > 0.015 else 1.3
+        # Điều chỉnh TP/SL buffer để scale theo biến động
+        TP_BUFFER = 1.15 if base_range > 0.015 else 1.25
+        SL_BUFFER = 1.4 if base_range > 0.015 else 1.5
 
-        TAKE_PROFIT_RATIO = round(min(0.05, max(0.015, base_range * (1.0 + confidence))) * TP_BUFFER, 4)
-        LOSS_CUTOFF_RATIO = round(min(0.03, max(0.006, base_range * (1.0 - confidence + 0.2))) * SL_BUFFER, 4)
+        # Lấy leverage dựa trên confidence (nếu cần dùng)
+        init_leverage = select_leverage(confidence)
+        leverage = round(init_leverage)
 
-        PARTIAL_TP_1 = round(0.25 * TAKE_PROFIT_RATIO, 4)
-        PARTIAL_TP_2 = round(0.6 * TAKE_PROFIT_RATIO, 4)
+        # Tính TP khoảng 1.2%
+        TAKE_PROFIT_RATIO = round(
+            min(0.015, base_range * (0.6 + confidence * 0.4)) * TP_BUFFER, 4
+        )
 
+        # Tính SL đảm bảo ít nhất là 1.5%
+        LOSS_CUTOFF_RATIO = round(
+            max(0.015, min(0.03, base_range * (1.0 - confidence + 0.3)) * SL_BUFFER), 4
+        )
+
+        # Chốt lời từng phần
+        PARTIAL_TP_1 = round(0.3 * TAKE_PROFIT_RATIO, 4)
+        PARTIAL_TP_2 = round(0.7 * TAKE_PROFIT_RATIO, 4)
+
+        print(f"base_range: {base_range} | TP: {TAKE_PROFIT_RATIO} | SL; {LOSS_CUTOFF_RATIO}")
+        entry_price = get_entry_price(SYMBOL)
         current_position = get_current_position_side(SYMBOL)
+
+        balance = get_balance()
+        qty = calculate_qty(balance, price, leverage, RISK_PERCENT, SYMBOL)
+
         if current_position:
             pnl = get_unrealized_pnl(SYMBOL)
-            balance = get_balance()
-            profit_ratio = pnl / balance if balance else 0
+            profit_ratio = (price - entry_price) / entry_price if entry_price else 0
+
             log(f"[INFO] Current position: {current_position} | PnL: {pnl:.2f} | Balance: {balance:.2f} | Profit Ratio: {profit_ratio*100:.2f}%")
 
             if not hasattr(close_position, "peak_profit"):
@@ -116,7 +136,7 @@ while True:
             else:
                 log(f"[INFO] Profit {profit_ratio*100:.2f}% (TP {TAKE_PROFIT_RATIO*100:.2f}%, SL {LOSS_CUTOFF_RATIO*100:.2f}%) → Hold")
 
-        if consecutive_losses >= 3:
+        if consecutive_losses >= 2:
             if trend and ((trend == 'UP' and action != 'LONG') or (trend == 'DOWN' and action != 'SHORT')):
                 log(f"[FILTER] Đang lỗ → chỉ đánh theo trend mạnh, bỏ lệnh ngược")
                 continue
@@ -126,8 +146,8 @@ while True:
         BREAKOUT_MARGIN_PERCENT = 0.01
         breakout_margin = price * BREAKOUT_MARGIN_PERCENT
 
-        recent_high = df['high_15m'].iloc[-2] if 'high_15m' in df.columns else None
-        recent_low = df['low_15m'].iloc[-2] if 'low_15m' in df.columns else None
+        recent_high = df[f'high_{INTERVALS[0]}'].iloc[-2] if f'high_{INTERVALS[0]}' in df.columns else None
+        recent_low = df[f'low_{INTERVALS[0]}'].iloc[-2] if f'low_{INTERVALS[0]}' in df.columns else None
 
         breakout_boost = min(0.06, max(0.02, avg_atr / price * 10))
         if action == 'LONG' and recent_high and price > recent_high + breakout_margin and confidence >= ENTRY_THRESHOLD:
@@ -147,7 +167,7 @@ while True:
                 log(f"[FILTER] Hành vi không ổn định + confidence sát ngưỡng → Bỏ")
                 continue
 
-            rsi_now = df['rsi_5m'].iloc[-1] if 'rsi_5m' in df.columns else None
+            rsi_now = df[f'rsi_{INTERVALS[0]}'].iloc[-1] if f'rsi_{INTERVALS[0]}' in df.columns else None
             if rsi_now:
                 if (action == 'LONG' and rsi_now < 50):
                     confidence -= 0.02
@@ -170,11 +190,6 @@ while True:
             elif 0.003 <= avg_atr / price <= 0.006:
                 log(f"[FILTER] ATR/Price = {avg_atr/price:.4f} → Sideway nguy hiểm, bỏ qua")
                 continue
-
-            balance = get_balance()
-            init_leverage = select_leverage(confidence)
-            leverage = round(init_leverage)
-            qty = calculate_qty(balance, price, leverage, RISK_PERCENT, SYMBOL)
 
             if qty <= 0 or qty is None or np.isnan(qty):
                 log(f"[WARN] Invalid qty: {qty}, skipping trade.")
