@@ -41,7 +41,7 @@ def get_btc_dominance():
 
 def get_dxy():
     try:
-        dxy = yf.download('DX-Y.NYB', period='1d', interval='1m')
+        dxy = yf.download("DX=F", period="7d", interval="1m")
         return dxy['Close'][-1]
     except:
         return 0.0
@@ -148,8 +148,7 @@ def fetch_features_multi_timeframe():
     try:
         combined['sentiment'] = analyze_news()
         combined['btc_dominance'] = get_btc_dominance()
-        dxy_value = get_dxy()
-        combined['dxy'] = dxy_value if dxy_value else combined["dxy"].mean()
+        combined['dxy'] = get_dxy()
         combined['funding_rate'] = get_funding_rate(SYMBOL)
     except Exception as e:
         print(f"[WARN] Failed to fetch external features: {e}")
