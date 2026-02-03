@@ -1,44 +1,80 @@
 # strategy_lstm_live.py
 import numpy as np
 import pandas as pd
-from tensorflow.keras.models import load_model
-import joblib
-from news_sentiment import analyze_news
+import os
 from config import *
 
-# Load model and scaler
-model = load_model(FINE_TUNE_MODEL_PATH)
-scaler = joblib.load("scaler.pkl")  # optional if saved during training
+# Lazy loading - don't load at import time
+_model = None
+_scaler = None
 
-FEATURES = [f"{col}_{interval}" for interval in INTERVALS for col in [
-    'rsi', 'rsi_diff', 'macd_diff', 'ema_20', 'ema_50', 'atr', 'volume',
-    'cci', 'stoch_k', 'stoch_d', 'mom', 'bb_width',
-    'volume_change', 'volume_ema', 'volume_ratio',
-    'candle_body', 'candle_range', 'upper_shadow', 'lower_shadow',
-    'body_to_range', 'upper_to_range', 'lower_to_range'
-]] + ['sentiment', 'btc_dominance', 'dxy', 'funding_rate']
+def _load_model_and_scaler():
+    """Load model and scaler lazily with proper error handling."""
+    global _model, _scaler
+
+    if _model is None:
+        from tensorflow.keras.models import load_model
+        import joblib
+
+        # Try to load best model first, then fine-tuned, then base model
+        model_paths = [BEST_MODEL_PATH, FINE_TUNE_MODEL_PATH, TRAINED_MODE_PATH]
+
+        for path in model_paths:
+            if os.path.exists(path):
+                try:
+                    # Try loading with custom objects for FocalLoss
+                    try:
+                        from train_lstm_keras import FocalLoss
+                        _model = load_model(path, custom_objects={'FocalLoss': FocalLoss})
+                    except:
+                        _model = load_model(path)
+                    print(f"[INFO] Loaded model: {path}")
+                    break
+                except Exception as e:
+                    print(f"[WARN] Failed to load {path}: {e}")
+
+        if _model is None:
+            raise FileNotFoundError("No trained model found! Run: python train_lstm_keras.py")
+
+        # Load scaler
+        if os.path.exists("scaler.pkl"):
+            _scaler = joblib.load("scaler.pkl")
+            print("[INFO] Loaded scaler: scaler.pkl")
+        else:
+            raise FileNotFoundError("scaler.pkl not found! Run: python train_lstm_keras.py")
+
+    return _model, _scaler
+
+# News sentiment (optional)
+def _get_news_impact():
+    try:
+        from news_sentiment import analyze_news
+        return analyze_news()
+    except Exception as e:
+        print(f"[WARN] News analysis failed: {e}")
+        return 0.0
 
 def preprocess_for_lstm(df: pd.DataFrame) -> np.ndarray:
+    """Preprocess dataframe for LSTM input."""
+    _, scaler = _load_model_and_scaler()
     df = df.dropna()
     return scaler.transform(df)
 
 
 def lstm_based_action(df_combined):
-    X_raw = df_combined.iloc[-SEQ_LEN_MODEL:]  # Giữ nguyên DataFrame và tên cột
+    """Get trading action from LSTM model."""
+    model, scaler = _load_model_and_scaler()
+
+    X_raw = df_combined.iloc[-SEQ_LEN_MODEL:]
     X_scaled = scaler.transform(X_raw)
     X_input = np.expand_dims(X_scaled, axis=0)
 
-    proba = model.predict(X_input)[0]
+    proba = model.predict(X_input, verbose=0)[0]
     pred = np.argmax(proba)
     confidence = float(np.max(proba))
 
-    # Thêm ảnh hưởng từ tin tức
-    try:
-        impact_score = analyze_news()
-    except Exception as e:
-        print(f"[WARN] Failed to analyze news: {e}")
-        impact_score = 0.0
-
+    # Add news sentiment influence
+    impact_score = _get_news_impact()
     adjusted_conf = min(1.0, max(0.0, confidence + impact_score))
 
     if pred == 1:

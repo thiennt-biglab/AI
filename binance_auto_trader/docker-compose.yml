@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  binance-trader:
+    image: thiennt810/binance-auto-trader:latest
+    container_name: binance-trader
+    restart: unless-stopped
+    volumes:
+      # Mount config file (required - contains API keys)
+      - ./config.py:/app/config.py:ro
+      # Mount data directory (for status files - readable outside)
+      - ./data:/app/data
+      # Mount models (optional - for trained models)
+      - ./best_model.keras:/app/best_model.keras:ro
+      - ./scaler.pkl:/app/scaler.pkl:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TF_CPP_MIN_LOG_LEVEL=2
+      - DATA_DIR=/app/data
+    # For paper trading, change command to:
+    # command: python paper_trading.py
+    command: python run.py

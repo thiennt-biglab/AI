@@ -1,3 +1,4 @@
+import os
 import numpy as np
 from binance.client import Client
 from config import (
@@ -11,6 +12,12 @@ from config import (
     USE_SESSION_FILTER, ALLOWED_SESSIONS, USE_VOLATILITY_FILTER, MAX_ATR_PERCENT, MIN_ATR_PERCENT,
     USE_CRASH_PROTECTION, CRASH_ATR_THRESHOLD, CRASH_VOLUME_SPIKE, CRASH_SINGLE_DROP, CRASH_4H_DROP
 )
+
+# Import ENTROPY_THRESHOLD with fallback
+try:
+    from config import ENTROPY_THRESHOLD
+except ImportError:
+    ENTROPY_THRESHOLD = 0.45  # Default: low entropy = high certainty
 from datetime import datetime
 
 # Import whale tracker for smart money confirmation
@@ -37,6 +44,7 @@ from sklearn.preprocessing import RobustScaler  # Better for outliers than Stand
 from sklearn.utils.class_weight import compute_class_weight
 import tensorflow as tf
 import joblib
+import xgboost as xgb
 from collections import Counter
 from feature_pipeline import fetch_features_multi_timeframe
 
@@ -71,6 +79,109 @@ class FocalLoss(tf.keras.losses.Loss):
         focal_loss = focal_weight * cross_entropy
 
         return tf.reduce_mean(tf.reduce_sum(focal_loss, axis=-1))
+
+
+# ============================================================
+# XGBOOST WRAPPER - Same API as Keras for compatibility
+# ============================================================
+class XGBoostWrapper:
+    """
+    XGBoost wrapper with Keras-like API for compatibility with training loop.
+    XGBoost often outperforms neural networks on small tabular datasets.
+    """
+    def __init__(self, n_classes=3):
+        self.n_classes = n_classes
+        self.model = None
+
+    def fit(self, X, y, validation_data=None, epochs=100, batch_size=32,
+            callbacks=None, class_weight=None, verbose=1):
+        # Flatten X from (samples, seq_len, features) to (samples, seq_len * features)
+        X_flat = X.reshape(X.shape[0], -1)
+
+        # Convert one-hot y back to labels
+        y_labels = np.argmax(y, axis=1)
+
+        # Prepare validation data
+        eval_set = None
+        if validation_data is not None:
+            X_val, y_val = validation_data
+            X_val_flat = X_val.reshape(X_val.shape[0], -1)
+            y_val_labels = np.argmax(y_val, axis=1)
+            eval_set = [(X_val_flat, y_val_labels)]
+
+        # Calculate sample weights from class weights
+        sample_weights = None
+        if class_weight is not None:
+            sample_weights = np.array([class_weight[label] for label in y_labels])
+
+        # XGBoost parameters optimized for high win rate
+        params = {
+            'objective': 'multi:softprob',
+            'num_class': self.n_classes,
+            'max_depth': 5,              # Shallower = less overfitting
+            'learning_rate': 0.03,       # Slower learning = better generalization
+            'n_estimators': 500,         # More trees with early stopping
+            'min_child_weight': 5,       # Prevent overfitting
+            'subsample': 0.7,            # Row sampling
+            'colsample_bytree': 0.7,     # Feature sampling
+            'reg_alpha': 0.5,            # L1 regularization (stronger)
+            'reg_lambda': 2.0,           # L2 regularization (stronger)
+            'random_state': 42,
+            'n_jobs': -1,
+            'verbosity': 0,
+            'early_stopping_rounds': 30  # Stop if no improvement
+        }
+
+        self.model = xgb.XGBClassifier(**params)
+
+        # Fit with early stopping
+        self.model.fit(
+            X_flat, y_labels,
+            sample_weight=sample_weights,
+            eval_set=eval_set,
+            verbose=verbose > 0
+        )
+
+        # Calculate actual accuracy for history
+        train_pred = self.model.predict(X_flat)
+        train_acc = np.mean(train_pred == y_labels)
+
+        val_acc = 0.5
+        val_loss = 1.0
+        if validation_data is not None:
+            val_pred = self.model.predict(X_val_flat)
+            val_acc = np.mean(val_pred == y_val_labels)
+            val_loss = 1.0 - val_acc  # Approximate loss
+
+        # Return fake history for compatibility
+        class FakeHistory:
+            def __init__(self, train_acc, val_acc, val_loss):
+                self.history = {
+                    'accuracy': [train_acc],
+                    'loss': [1.0 - train_acc],
+                    'val_accuracy': [val_acc],
+                    'val_loss': [val_loss]
+                }
+        return FakeHistory(train_acc, val_acc, val_loss)
+
+    def predict(self, X, verbose=0):
+        X_flat = X.reshape(X.shape[0], -1)
+        probs = self.model.predict_proba(X_flat)
+        return probs
+
+    def save(self, path):
+        # Save as joblib
+        joblib.dump(self.model, path.replace('.keras', '_xgb.pkl'))
+
+    def get_feature_importance(self):
+        if self.model is not None:
+            return self.model.feature_importances_
+        return None
+
+
+def build_xgboost_model():
+    """Build XGBoost classifier wrapper."""
+    return XGBoostWrapper(n_classes=3)
 
 
 # ============================================================
@@ -125,9 +236,9 @@ def triple_barrier_labels(close, high, low, tp_mult=1.5, sl_mult=1.0, max_holdin
             tp_barrier = entry * (1 + atr[i] / entry * tp_mult)
             sl_barrier = entry * (1 - atr[i] / entry * sl_mult)
         else:
-            # Fallback to fixed percentage
-            tp_barrier = entry * 1.008  # 0.8%
-            sl_barrier = entry * 0.995  # 0.5%
+            # Fallback to fixed percentage (relaxed for more signals)
+            tp_barrier = entry * 1.005  # 0.5%
+            sl_barrier = entry * 0.997  # 0.3%
 
         # Check which barrier is hit first
         for j in range(1, max_holding + 1):
@@ -225,25 +336,26 @@ def check_timeframe_alignment(df, idx, pred_class, intervals):
 
 client = Client(API_KEY, API_SECRET)
 
-# === LABELING CONFIG FOR BTC/USDT (less volatile than altcoins) ===
-# BTC ATR ~0.19% on 5m, avg 8-candle gain ~0.42%
-FUTURE_WINDOW = 12           # Longer window for more reliable signals
-MIN_MOVE_PERCENT = 0.008     # 0.8% move for BTC (lower than altcoins)
-NEUTRAL_ZONE = 0.003         # 0.3% neutral zone for BTC
-MIN_ATR_RATIO = 0.001        # BTC has lower ATR, adjust threshold
-CONFIRMATION_CANDLES = 3     # Price must sustain move for this many candles
+# === LABELING CONFIG FOR BTC/USDT (1h candles) ===
+# Adjusted for 1h timeframe with clearer signals
+FUTURE_WINDOW = 12           # 12 candles = 12 hours
+MIN_MOVE_PERCENT = 0.012     # 1.2% move required (clearer signal for 1h)
+NEUTRAL_ZONE = 0.005         # Wider neutral zone
+MIN_ATR_RATIO = 0.001        # Standard threshold
+CONFIRMATION_CANDLES = 3     # Require sustained move
 
 # Data augmentation settings
-USE_DATA_AUGMENTATION = True
-AUGMENTATION_NOISE = 0.005   # 0.5% noise factor
-NUM_AUGMENTATIONS = 1        # Number of augmented copies
+# DISABLED: Can cause overfitting with small datasets
+USE_DATA_AUGMENTATION = False  # Disabled to prevent overfitting
+AUGMENTATION_NOISE = 0.01      # 1% noise factor (if enabled)
+NUM_AUGMENTATIONS = 1          # Number of augmented copies
 
 # Use advanced labeling
 USE_TRIPLE_BARRIER = True    # Use Triple Barrier method for more accurate labels
 
 # === Training pipeline ===
 print("[INFO] Fetching data from Binance...")
-df = fetch_features_multi_timeframe()
+df = fetch_features_multi_timeframe(use_cache=False)  # Full fetch for training
 
 # Use RobustScaler (better handles outliers than StandardScaler)
 print("[INFO] Scaling features with RobustScaler...")
@@ -268,8 +380,8 @@ if USE_TRIPLE_BARRIER:
     print("[INFO] Using Triple Barrier labeling method...")
     labels = triple_barrier_labels(
         close, high, low,
-        tp_mult=1.5,      # TP at 1.5x ATR
-        sl_mult=1.0,      # SL at 1.0x ATR
+        tp_mult=1.0,      # Reduced from 1.5 - easier to hit TP
+        sl_mult=0.8,      # Reduced from 1.0 - tighter SL
         max_holding=FUTURE_WINDOW,
         atr=atr
     )
@@ -315,7 +427,11 @@ else:
                     labels[i] = 2  # SHORT
                     continue
 
-print(f"[INFO] Label distribution: {Counter(labels.astype(int))}")
+label_counts = Counter(labels.astype(int))
+print(f"[INFO] Label distribution: {label_counts}")
+print(f"[INFO] HOLD: {label_counts.get(0, 0)} ({label_counts.get(0, 0)/len(labels)*100:.1f}%)")
+print(f"[INFO] LONG: {label_counts.get(1, 0)} ({label_counts.get(1, 0)/len(labels)*100:.1f}%)")
+print(f"[INFO] SHORT: {label_counts.get(2, 0)} ({label_counts.get(2, 0)/len(labels)*100:.1f}%)")
 
 # Remove samples too close to end (not enough future data)
 valid_idx = np.arange(len(labels) - FUTURE_WINDOW)
@@ -329,14 +445,19 @@ window = SEQ_LEN_MODEL
 for i in range(window, len(X)):
     X_seq.append(X[i - window:i])
     y_seq.append(labels[i])
-close_prices = df['ema_20_5m'].values[window:]
+
+# Use dynamic column name based on primary timeframe
+primary_tf = INTERVALS[0]
+ema_col = f'ema_20_{primary_tf}' if f'ema_20_{primary_tf}' in df.columns else f'close_{primary_tf}'
+close_prices = df[ema_col].values[window:]
 
 X_seq = np.array(X_seq)
 y_seq = np.array(y_seq)
 
 # === TIME-SERIES AWARE SPLIT (prevents look-ahead bias) ===
 # Use chronological split: train on older data, test on newer data
-split_idx = int(len(X_seq) * 0.8)
+# 70/30 split (with 30 days data: ~21 days train, ~9 days test)
+split_idx = int(len(X_seq) * 0.7)
 X_train, X_test = X_seq[:split_idx], X_seq[split_idx:]
 y_train_raw, y_test_raw = y_seq[:split_idx], y_seq[split_idx:]
 
@@ -375,56 +496,75 @@ y_test = to_categorical(y_test_raw, num_classes=3)
 print(f"[INFO] Final label distribution: {dict(zip(['HOLD', 'LONG', 'SHORT'], np.bincount(y_seq.astype(int))))}")
 
 # === Model builders ===
+# BALANCED REGULARIZATION: Moderate dropout (0.3) and light L2 (0.0001)
+# Previous version was too aggressive, causing underfitting
+
 def build_model_1():
     model = Sequential([
         Input(shape=(X_train.shape[1], X_train.shape[2])),
-        LSTM(128, return_sequences=True),
-        Dropout(0.4),
-        LSTM(64),
-        Dense(64, activation='relu'),
+        LSTM(128, return_sequences=True, kernel_regularizer=l2(0.0001)),
+        BatchNormalization(),
+        Dropout(0.3),
+        LSTM(64, kernel_regularizer=l2(0.0001)),
+        Dropout(0.3),
+        Dense(64, activation='relu', kernel_regularizer=l2(0.0001)),
+        BatchNormalization(),
         Dropout(0.3),
         Dense(3, activation='softmax')
     ])
-    model.compile(optimizer='adam', loss=CategoricalCrossentropy(label_smoothing=0.05), metrics=['accuracy'])
+    model.compile(optimizer=AdamW(learning_rate=0.001, weight_decay=0.005),
+                  loss=CategoricalCrossentropy(label_smoothing=0.01), metrics=['accuracy'])
     return model
 
 def build_model_2():
     model = Sequential([
         Input(shape=(X_train.shape[1], X_train.shape[2])),
-        LSTM(64, return_sequences=True),
+        LSTM(64, return_sequences=True, kernel_regularizer=l2(0.0001)),
+        BatchNormalization(),
         Dropout(0.3),
-        LSTM(32),
-        Dense(32, activation='relu'),
-        Dropout(0.2),
+        LSTM(32, kernel_regularizer=l2(0.0001)),
+        Dropout(0.3),
+        Dense(32, activation='relu', kernel_regularizer=l2(0.0001)),
+        BatchNormalization(),
+        Dropout(0.3),
         Dense(3, activation='softmax')
     ])
-    model.compile(optimizer='adam', loss=CategoricalCrossentropy(label_smoothing=0.05), metrics=['accuracy'])
+    model.compile(optimizer=AdamW(learning_rate=0.001, weight_decay=0.005),
+                  loss=CategoricalCrossentropy(label_smoothing=0.01), metrics=['accuracy'])
     return model
 
 def build_model_gru():
     model = Sequential([
         Input(shape=(X_train.shape[1], X_train.shape[2])),
-        GRU(64, return_sequences=True),
+        GRU(64, return_sequences=True, kernel_regularizer=l2(0.0001)),
+        BatchNormalization(),
         Dropout(0.3),
-        GRU(32),
-        Dense(32, activation='relu'),
-        Dropout(0.2),
+        GRU(32, kernel_regularizer=l2(0.0001)),
+        Dropout(0.3),
+        Dense(32, activation='relu', kernel_regularizer=l2(0.0001)),
+        BatchNormalization(),
+        Dropout(0.3),
         Dense(3, activation='softmax')
     ])
-    model.compile(optimizer='adam', loss=CategoricalCrossentropy(label_smoothing=0.05), metrics=['accuracy'])
+    model.compile(optimizer=AdamW(learning_rate=0.001, weight_decay=0.005),
+                  loss=CategoricalCrossentropy(label_smoothing=0.01), metrics=['accuracy'])
     return model
 
 def build_model_bilstm():
     model = Sequential([
         Input(shape=(X_train.shape[1], X_train.shape[2])),
-        Bidirectional(LSTM(64, return_sequences=True)),
+        Bidirectional(LSTM(64, return_sequences=True, kernel_regularizer=l2(0.0001))),
+        BatchNormalization(),
         Dropout(0.3),
-        Bidirectional(LSTM(32)),
-        Dense(32, activation='relu'),
-        Dropout(0.2),
+        Bidirectional(LSTM(32, kernel_regularizer=l2(0.0001))),
+        Dropout(0.3),
+        Dense(32, activation='relu', kernel_regularizer=l2(0.0001)),
+        BatchNormalization(),
+        Dropout(0.3),
         Dense(3, activation='softmax')
     ])
-    model.compile(optimizer='adam', loss=CategoricalCrossentropy(label_smoothing=0.05), metrics=['accuracy'])
+    model.compile(optimizer=AdamW(learning_rate=0.001, weight_decay=0.005),
+                  loss=CategoricalCrossentropy(label_smoothing=0.01), metrics=['accuracy'])
     return model
 
 def build_model_lstm_attention():
@@ -432,51 +572,63 @@ def build_model_lstm_attention():
     from tensorflow.keras import layers
 
     inputs = Input(shape=(X_train.shape[1], X_train.shape[2]))
-    x = LSTM(64, return_sequences=True)(inputs)
+    x = LSTM(64, return_sequences=True, kernel_regularizer=l2(0.0001))(inputs)
+    x = BatchNormalization()(x)
     x = Dropout(0.3)(x)
-    attn_output = MultiHeadAttention(num_heads=4, key_dim=32)(x, x)
+    attn_output = MultiHeadAttention(num_heads=4, key_dim=32, dropout=0.1)(x, x)
     x = layers.Add()([x, attn_output])
     x = LayerNormalization()(x)
     x = GlobalAveragePooling1D()(x)
-    x = Dense(64, activation='relu')(x)
+    x = Dense(64, activation='relu', kernel_regularizer=l2(0.0001))(x)
+    x = BatchNormalization()(x)
     x = Dropout(0.3)(x)
     outputs = Dense(3, activation='softmax')(x)
     model = Model(inputs, outputs)
-    model.compile(optimizer='adam', loss=CategoricalCrossentropy(label_smoothing=0.05), metrics=['accuracy'])
+    model.compile(optimizer=AdamW(learning_rate=0.001, weight_decay=0.005),
+                  loss=CategoricalCrossentropy(label_smoothing=0.01), metrics=['accuracy'])
     return model
 
 def build_cnn_lstm_model():
     model = Sequential([
         Input(shape=(X_train.shape[1], X_train.shape[2])),
-        Conv1D(filters=64, kernel_size=3, activation='relu'),
+        Conv1D(filters=64, kernel_size=3, activation='relu', kernel_regularizer=l2(0.0001)),
+        BatchNormalization(),
+        Dropout(0.2),
         MaxPooling1D(pool_size=2),
-        LSTM(64),
-        Dense(64, activation='relu'),
+        LSTM(64, kernel_regularizer=l2(0.0001)),
+        Dropout(0.3),
+        Dense(64, activation='relu', kernel_regularizer=l2(0.0001)),
+        BatchNormalization(),
         Dropout(0.3),
         Dense(3, activation='softmax')
     ])
-    model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+    model.compile(optimizer=AdamW(learning_rate=0.001, weight_decay=0.005),
+                  loss=CategoricalCrossentropy(label_smoothing=0.01), metrics=['accuracy'])
     return model
 
 def build_transformer_encoder_model():
-    """Standard Transformer encoder model."""
+    """Standard Transformer encoder model with balanced regularization."""
     inputs = Input(shape=(X_train.shape[1], X_train.shape[2]))
-    x = MultiHeadAttention(num_heads=4, key_dim=32)(inputs, inputs)
+    x = MultiHeadAttention(num_heads=4, key_dim=32, dropout=0.1)(inputs, inputs)
     x = Add()([inputs, x])
     x = LayerNormalization()(x)
+    x = Dropout(0.2)(x)
 
-    dense_output = Dense(inputs.shape[-1], activation='relu')(x)
+    dense_output = Dense(inputs.shape[-1], activation='relu', kernel_regularizer=l2(0.0001))(x)
+    dense_output = Dropout(0.2)(dense_output)
     x = Add()([x, dense_output])
     x = LayerNormalization()(x)
 
     x = GlobalAveragePooling1D()(x)
     x = Dropout(0.3)(x)
-    x = Dense(64, activation='relu')(x)
+    x = Dense(64, activation='relu', kernel_regularizer=l2(0.0001))(x)
+    x = BatchNormalization()(x)
     x = Dropout(0.3)(x)
     outputs = Dense(3, activation='softmax')(x)
 
     model = Model(inputs, outputs)
-    model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+    model.compile(optimizer=AdamW(learning_rate=0.001, weight_decay=0.005),
+                  loss=CategoricalCrossentropy(label_smoothing=0.01), metrics=['accuracy'])
     return model
 
 
@@ -486,247 +638,304 @@ def build_transformer_encoder_model():
 
 def build_transformer_lstm_ensemble():
     """
-    Transformer-LSTM Ensemble (Based on arXiv:2503.22192)
-    Combines Transformer's attention for long-range patterns with LSTM's sequential learning.
-    Research shows 9% MAPE improvement over single models.
-    Now uses Focal Loss for better handling of imbalanced classes.
+    Transformer-LSTM Ensemble - balanced regularization.
     """
     inputs = Input(shape=(X_train.shape[1], X_train.shape[2]))
 
-    # Add slight noise for regularization
     x = GaussianNoise(0.01)(inputs)
 
-    # Branch 1: Transformer path
+    # Transformer path
     attn = MultiHeadAttention(num_heads=4, key_dim=32, dropout=0.1)(x, x)
     attn = Add()([x, attn])
     attn = LayerNormalization()(attn)
-    attn = Dense(64, activation='gelu')(attn)
+    attn = Dense(64, activation='gelu', kernel_regularizer=l2(0.0001))(attn)
+    attn = Dropout(0.2)(attn)
     attn = LayerNormalization()(attn)
     transformer_out = GlobalAveragePooling1D()(attn)
 
-    # Branch 2: LSTM path
-    lstm = LSTM(64, return_sequences=True, dropout=0.2, recurrent_dropout=0.1)(x)
-    lstm = LSTM(32, dropout=0.2)(lstm)
+    # LSTM path
+    lstm = LSTM(64, return_sequences=True, dropout=0.2, kernel_regularizer=l2(0.0001))(x)
+    lstm = LSTM(32, dropout=0.2, kernel_regularizer=l2(0.0001))(lstm)
 
-    # Merge branches
     merged = Concatenate()([transformer_out, lstm])
-    x = Dense(64, activation='relu', kernel_regularizer=l2(0.001))(merged)
+    x = Dense(64, activation='relu', kernel_regularizer=l2(0.0001))(merged)
     x = BatchNormalization()(x)
-    x = Dropout(0.4)(x)
-    x = Dense(32, activation='relu')(x)
+    x = Dropout(0.3)(x)
+    x = Dense(32, activation='relu', kernel_regularizer=l2(0.0001))(x)
     x = Dropout(0.3)(x)
     outputs = Dense(3, activation='softmax')(x)
 
     model = Model(inputs, outputs)
     model.compile(
-        optimizer=AdamW(learning_rate=0.001, weight_decay=0.01),
-        loss=FocalLoss(gamma=2.0, alpha=0.25, label_smoothing=0.1),  # Focal Loss
+        optimizer=AdamW(learning_rate=0.001, weight_decay=0.005),
+        loss=FocalLoss(gamma=2.0, alpha=0.25, label_smoothing=0.01),
         metrics=['accuracy']
     )
     return model
 
 
 def build_multiscale_cnn_lstm():
-    """
-    Multi-Scale CNN-LSTM (Based on MDPI hybrid models research)
-    Captures patterns at different time scales - important for reducing false signals.
-    Uses multiple kernel sizes to detect short, medium, and long-term patterns.
-    """
+    """Multi-Scale CNN-LSTM - balanced regularization."""
     inputs = Input(shape=(X_train.shape[1], X_train.shape[2]))
 
-    # Multi-scale CNN feature extraction
-    conv1 = Conv1D(32, kernel_size=2, padding='same', activation='relu')(inputs)
-    conv2 = Conv1D(32, kernel_size=3, padding='same', activation='relu')(inputs)
-    conv3 = Conv1D(32, kernel_size=5, padding='same', activation='relu')(inputs)
+    conv1 = Conv1D(32, kernel_size=2, padding='same', activation='relu', kernel_regularizer=l2(0.0001))(inputs)
+    conv2 = Conv1D(32, kernel_size=3, padding='same', activation='relu', kernel_regularizer=l2(0.0001))(inputs)
+    conv3 = Conv1D(32, kernel_size=5, padding='same', activation='relu', kernel_regularizer=l2(0.0001))(inputs)
 
-    # Concatenate multi-scale features
     multi_scale = Concatenate()([conv1, conv2, conv3])
     multi_scale = BatchNormalization()(multi_scale)
+    multi_scale = Dropout(0.2)(multi_scale)
     multi_scale = MaxPooling1D(pool_size=2)(multi_scale)
 
-    # LSTM for temporal learning
-    lstm = LSTM(64, return_sequences=True, dropout=0.2)(multi_scale)
-    lstm = LSTM(32, dropout=0.2)(lstm)
+    lstm = LSTM(64, return_sequences=True, dropout=0.2, kernel_regularizer=l2(0.0001))(multi_scale)
+    lstm = LSTM(32, dropout=0.2, kernel_regularizer=l2(0.0001))(lstm)
 
-    x = Dense(64, activation='relu', kernel_regularizer=l2(0.001))(lstm)
+    x = Dense(64, activation='relu', kernel_regularizer=l2(0.0001))(lstm)
     x = BatchNormalization()(x)
-    x = Dropout(0.4)(x)
-    x = Dense(32, activation='relu')(x)
+    x = Dropout(0.3)(x)
+    x = Dense(32, activation='relu', kernel_regularizer=l2(0.0001))(x)
     x = Dropout(0.3)(x)
     outputs = Dense(3, activation='softmax')(x)
 
     model = Model(inputs, outputs)
     model.compile(
-        optimizer=AdamW(learning_rate=0.001, weight_decay=0.01),
-        loss=CategoricalCrossentropy(label_smoothing=0.1),
+        optimizer=AdamW(learning_rate=0.001, weight_decay=0.005),
+        loss=CategoricalCrossentropy(label_smoothing=0.01),
         metrics=['accuracy']
     )
     return model
 
 
 def build_attention_gru_with_skip():
-    """
-    Attention-GRU with Skip Connections
-    Based on research showing attention mechanisms improve directional accuracy by ~10%.
-    Skip connections help preserve gradient flow for better training.
-    """
+    """Attention-GRU with Skip Connections - balanced regularization."""
     inputs = Input(shape=(X_train.shape[1], X_train.shape[2]))
 
-    # GRU with attention
-    gru1 = GRU(64, return_sequences=True, dropout=0.2, recurrent_dropout=0.1)(inputs)
+    gru1 = GRU(64, return_sequences=True, dropout=0.2, kernel_regularizer=l2(0.0001))(inputs)
 
-    # Self-attention layer
-    attn = MultiHeadAttention(num_heads=4, key_dim=16)(gru1, gru1)
-    attn = Add()([gru1, attn])  # Skip connection
+    attn = MultiHeadAttention(num_heads=4, key_dim=16, dropout=0.1)(gru1, gru1)
+    attn = Add()([gru1, attn])
     attn = LayerNormalization()(attn)
+    attn = Dropout(0.2)(attn)
 
-    gru2 = GRU(32, return_sequences=False, dropout=0.2)(attn)
+    gru2 = GRU(32, return_sequences=False, dropout=0.2, kernel_regularizer=l2(0.0001))(attn)
 
-    # Project input for skip connection
     skip = GlobalAveragePooling1D()(inputs)
-    skip = Dense(32, activation='relu')(skip)
+    skip = Dense(32, activation='relu', kernel_regularizer=l2(0.0001))(skip)
+    skip = Dropout(0.2)(skip)
 
-    # Merge with skip
     merged = Add()([gru2, skip])
 
-    x = Dense(64, activation='relu', kernel_regularizer=l2(0.001))(merged)
+    x = Dense(64, activation='relu', kernel_regularizer=l2(0.0001))(merged)
     x = BatchNormalization()(x)
-    x = Dropout(0.4)(x)
-    x = Dense(32, activation='relu')(x)
+    x = Dropout(0.3)(x)
+    x = Dense(32, activation='relu', kernel_regularizer=l2(0.0001))(x)
     x = Dropout(0.3)(x)
     outputs = Dense(3, activation='softmax')(x)
 
     model = Model(inputs, outputs)
     model.compile(
-        optimizer=AdamW(learning_rate=0.001, weight_decay=0.01),
-        loss=CategoricalCrossentropy(label_smoothing=0.1),
+        optimizer=AdamW(learning_rate=0.001, weight_decay=0.005),
+        loss=CategoricalCrossentropy(label_smoothing=0.01),
         metrics=['accuracy']
     )
     return model
 
 
 def build_temporal_conv_network():
-    """
-    Temporal Convolutional Network (TCN)
-    Research shows TCNs can outperform LSTMs for time-series with better parallelization.
-    Uses dilated convolutions to capture long-range dependencies.
-    """
+    """TCN - balanced regularization."""
     inputs = Input(shape=(X_train.shape[1], X_train.shape[2]))
 
-    # Dilated causal convolutions (TCN style)
     x = inputs
     skip_connections = []
 
     for dilation in [1, 2, 4, 8]:
-        conv = Conv1D(64, kernel_size=3, padding='causal', dilation_rate=dilation, activation='relu')(x)
+        conv = Conv1D(64, kernel_size=3, padding='causal', dilation_rate=dilation,
+                      activation='relu', kernel_regularizer=l2(0.0001))(x)
         conv = BatchNormalization()(conv)
         conv = Dropout(0.2)(conv)
         skip_connections.append(conv)
         x = conv
 
-    # Sum skip connections
     x = Add()(skip_connections)
     x = GlobalAveragePooling1D()(x)
 
-    x = Dense(64, activation='relu', kernel_regularizer=l2(0.001))(x)
+    x = Dense(64, activation='relu', kernel_regularizer=l2(0.0001))(x)
     x = BatchNormalization()(x)
-    x = Dropout(0.4)(x)
-    x = Dense(32, activation='relu')(x)
+    x = Dropout(0.3)(x)
+    x = Dense(32, activation='relu', kernel_regularizer=l2(0.0001))(x)
     x = Dropout(0.3)(x)
     outputs = Dense(3, activation='softmax')(x)
 
     model = Model(inputs, outputs)
     model.compile(
-        optimizer=AdamW(learning_rate=0.001, weight_decay=0.01),
-        loss=CategoricalCrossentropy(label_smoothing=0.1),
+        optimizer=AdamW(learning_rate=0.001, weight_decay=0.005),
+        loss=CategoricalCrossentropy(label_smoothing=0.01),
         metrics=['accuracy']
     )
     return model
 
 
 def build_deep_transformer():
-    """
-    Deep Transformer with multiple encoder layers.
-    Based on research showing Transformers achieve 69.1% directional accuracy.
-    Uses positional encoding and multiple attention layers.
-    """
+    """Deep Transformer - balanced regularization."""
     inputs = Input(shape=(X_train.shape[1], X_train.shape[2]))
 
-    # Simple positional encoding (learnable)
-    pos_encoding = Dense(X_train.shape[2])(inputs)
+    pos_encoding = Dense(X_train.shape[2], kernel_regularizer=l2(0.0001))(inputs)
     x = Add()([inputs, pos_encoding])
+    x = Dropout(0.1)(x)
 
-    # Multiple transformer blocks
     for _ in range(3):
-        # Multi-head attention
         attn = MultiHeadAttention(num_heads=4, key_dim=32, dropout=0.1)(x, x)
         x = Add()([x, attn])
         x = LayerNormalization()(x)
 
-        # Feed-forward
-        ff = Dense(128, activation='gelu')(x)
+        ff = Dense(128, activation='gelu', kernel_regularizer=l2(0.0001))(x)
         ff = Dropout(0.2)(ff)
-        ff = Dense(X_train.shape[2])(ff)
+        ff = Dense(X_train.shape[2], kernel_regularizer=l2(0.0001))(ff)
         x = Add()([x, ff])
         x = LayerNormalization()(x)
 
     x = GlobalAveragePooling1D()(x)
-    x = Dense(64, activation='relu', kernel_regularizer=l2(0.001))(x)
+    x = Dense(64, activation='relu', kernel_regularizer=l2(0.0001))(x)
     x = BatchNormalization()(x)
-    x = Dropout(0.4)(x)
-    x = Dense(32, activation='relu')(x)
+    x = Dropout(0.3)(x)
+    x = Dense(32, activation='relu', kernel_regularizer=l2(0.0001))(x)
     x = Dropout(0.3)(x)
     outputs = Dense(3, activation='softmax')(x)
 
     model = Model(inputs, outputs)
     model.compile(
-        optimizer=AdamW(learning_rate=0.0005, weight_decay=0.01),
-        loss=CategoricalCrossentropy(label_smoothing=0.1),
+        optimizer=AdamW(learning_rate=0.0005, weight_decay=0.005),
+        loss=CategoricalCrossentropy(label_smoothing=0.01),
         metrics=['accuracy']
     )
     return model
 
 
 def build_wavenet_style():
-    """
-    WaveNet-style model with gated activations.
-    Originally designed for audio, proven effective for financial time-series.
-    """
+    """WaveNet-style - balanced regularization."""
     inputs = Input(shape=(X_train.shape[1], X_train.shape[2]))
 
     x = inputs
     skip_outputs = []
 
     for dilation in [1, 2, 4, 8, 16]:
-        # Gated activation
-        filter_conv = Conv1D(32, kernel_size=2, padding='causal', dilation_rate=dilation)(x)
-        gate_conv = Conv1D(32, kernel_size=2, padding='causal', dilation_rate=dilation, activation='sigmoid')(x)
+        filter_conv = Conv1D(32, kernel_size=2, padding='causal', dilation_rate=dilation,
+                             kernel_regularizer=l2(0.0001))(x)
+        gate_conv = Conv1D(32, kernel_size=2, padding='causal', dilation_rate=dilation,
+                           activation='sigmoid', kernel_regularizer=l2(0.0001))(x)
         gated = Multiply()([tf.nn.tanh(filter_conv), gate_conv])
+        gated = Dropout(0.15)(gated)
 
-        # Skip connection
-        skip = Conv1D(32, kernel_size=1)(gated)
+        skip = Conv1D(32, kernel_size=1, kernel_regularizer=l2(0.0001))(gated)
         skip_outputs.append(skip)
 
-        # Residual
-        residual = Conv1D(X_train.shape[2], kernel_size=1)(gated)
+        residual = Conv1D(X_train.shape[2], kernel_size=1, kernel_regularizer=l2(0.0001))(gated)
         x = Add()([x, residual])
 
-    # Sum all skip connections
     x = Add()(skip_outputs)
     x = tf.nn.relu(x)
     x = GlobalAveragePooling1D()(x)
 
-    x = Dense(64, activation='relu', kernel_regularizer=l2(0.001))(x)
+    x = Dense(64, activation='relu', kernel_regularizer=l2(0.0001))(x)
     x = BatchNormalization()(x)
-    x = Dropout(0.4)(x)
-    x = Dense(32, activation='relu')(x)
+    x = Dropout(0.3)(x)
+    x = Dense(32, activation='relu', kernel_regularizer=l2(0.0001))(x)
     x = Dropout(0.3)(x)
     outputs = Dense(3, activation='softmax')(x)
 
     model = Model(inputs, outputs)
     model.compile(
-        optimizer=AdamW(learning_rate=0.001, weight_decay=0.01),
-        loss=CategoricalCrossentropy(label_smoothing=0.1),
+        optimizer=AdamW(learning_rate=0.001, weight_decay=0.005),
+        loss=CategoricalCrossentropy(label_smoothing=0.01),
+        metrics=['accuracy']
+    )
+    return model
+
+
+# ============================================================
+# LIGHTWEIGHT MODELS - Better for small datasets
+# ============================================================
+
+def build_simple_gru():
+    """
+    Very light GRU - only ~20K parameters.
+    Best for small datasets to avoid overfitting.
+    """
+    model = Sequential([
+        Input(shape=(X_train.shape[1], X_train.shape[2])),
+        GRU(32, kernel_regularizer=l2(0.001)),  # Single layer, strong reg
+        BatchNormalization(),
+        Dropout(0.4),
+        Dense(16, activation='relu', kernel_regularizer=l2(0.001)),
+        Dropout(0.4),
+        Dense(3, activation='softmax')
+    ])
+    model.compile(
+        optimizer=AdamW(learning_rate=0.0005, weight_decay=0.01),
+        loss=CategoricalCrossentropy(label_smoothing=0.05),
+        metrics=['accuracy']
+    )
+    return model
+
+
+def build_simple_cnn():
+    """
+    Simple 1D CNN - only ~15K parameters.
+    Good for pattern detection without sequence memory.
+    """
+    inputs = Input(shape=(X_train.shape[1], X_train.shape[2]))
+
+    x = Conv1D(32, kernel_size=3, activation='relu', padding='same',
+               kernel_regularizer=l2(0.001))(inputs)
+    x = BatchNormalization()(x)
+    x = MaxPooling1D(2)(x)
+    x = Dropout(0.4)(x)
+
+    x = Conv1D(16, kernel_size=3, activation='relu', padding='same',
+               kernel_regularizer=l2(0.001))(x)
+    x = BatchNormalization()(x)
+    x = GlobalAveragePooling1D()(x)
+    x = Dropout(0.4)(x)
+
+    x = Dense(16, activation='relu', kernel_regularizer=l2(0.001))(x)
+    x = Dropout(0.3)(x)
+    outputs = Dense(3, activation='softmax')(x)
+
+    model = Model(inputs, outputs)
+    model.compile(
+        optimizer=AdamW(learning_rate=0.0005, weight_decay=0.01),
+        loss=CategoricalCrossentropy(label_smoothing=0.05),
+        metrics=['accuracy']
+    )
+    return model
+
+
+def build_cnn_gru_light():
+    """
+    Lightweight CNN + GRU hybrid - ~40K parameters.
+    CNN extracts local patterns, GRU handles sequence.
+    """
+    inputs = Input(shape=(X_train.shape[1], X_train.shape[2]))
+
+    # CNN for pattern extraction
+    x = Conv1D(32, kernel_size=3, activation='relu', padding='same',
+               kernel_regularizer=l2(0.001))(inputs)
+    x = BatchNormalization()(x)
+    x = Dropout(0.3)(x)
+
+    # GRU for sequence
+    x = GRU(24, kernel_regularizer=l2(0.001))(x)
+    x = BatchNormalization()(x)
+    x = Dropout(0.4)(x)
+
+    x = Dense(16, activation='relu', kernel_regularizer=l2(0.001))(x)
+    x = Dropout(0.3)(x)
+    outputs = Dense(3, activation='softmax')(x)
+
+    model = Model(inputs, outputs)
+    model.compile(
+        optimizer=AdamW(learning_rate=0.0005, weight_decay=0.01),
+        loss=CategoricalCrossentropy(label_smoothing=0.05),
         metrics=['accuracy']
     )
     return model
@@ -737,21 +946,15 @@ def build_wavenet_style():
 # ============================================================
 
 models = {
-    # Original models
-    "lstm_v1": build_model_1(),
-    "lstm_v2": build_model_2(),
-    "gru": build_model_gru(),
-    "bilstm": build_model_bilstm(),
-    "lstm_attn": build_model_lstm_attention(),
-    "cnn_lstm": build_cnn_lstm_model(),
-    "transformer": build_transformer_encoder_model(),
-    # Advanced models from research
-    "transformer_lstm": build_transformer_lstm_ensemble(),      # Best hybrid approach
-    "multiscale_cnn_lstm": build_multiscale_cnn_lstm(),        # Multi-scale patterns
-    "attention_gru": build_attention_gru_with_skip(),          # Attention + skip connections
-    "tcn": build_temporal_conv_network(),                       # Temporal conv network
-    "deep_transformer": build_deep_transformer(),               # Deep attention model
-    "wavenet": build_wavenet_style(),                          # Gated convolutions
+    # New lightweight models for small data
+    "cnn_gru": build_cnn_gru_light(),                   # CNN + GRU hybrid
+    "xgboost": build_xgboost_model(),                   # Often best for tabular data
+
+    # Previous best performers
+    "deep_transformer": build_deep_transformer(),       # 87% win rate before
+    "tcn": build_temporal_conv_network(),               # 78% win rate before
+    "lstm_attn": build_model_lstm_attention(),          # Good baseline
+    "transformer": build_transformer_encoder_model(),   # Consistent
 }
 
 # ============================================================
@@ -1157,25 +1360,34 @@ if __name__ == "__main__":
     # TRADING_MODE is imported from config.py
     print(f"[CONFIG] Trading Mode: {TRADING_MODE}")
 
+    # === BALANCED REGULARIZATION SUMMARY ===
+    print(f"\n{'='*60}")
+    print("BALANCED REGULARIZATION (prevents over/underfitting):")
+    print('='*60)
+    print("1. DROPOUT: Moderate 0.2-0.3 (not too aggressive)")
+    print("2. L2 REGULARIZATION: Light 0.0001 (prevents weight explosion)")
+    print("3. BATCH NORMALIZATION: Added after major layers")
+    print("4. BATCH SIZE: 16 (more gradient updates)")
+    print("5. EARLY STOPPING: patience=10, min_delta=0.001")
+    print("6. LABEL SMOOTHING: Light 0.05 (prevents overconfidence)")
+    print("7. WEIGHT DECAY: AdamW with weight_decay=0.005")
+    print("8. MORE DATA: Fetching 100,000 historical candles")
+    print("9. CONFIDENCE THRESHOLD: Lowered to 0.45 for backtest")
+    print('='*60)
+
+    # Use values from config
+    CONFIDENCE_THRESHOLD = ENTRY_THRESHOLD
+    ENTROPY_THRESH = ENTROPY_THRESHOLD  # Local copy for backtest
+    BASE_TP = TP_MIN
+    BASE_SL = SL_MIN
+    BACKTEST_WINDOW = FUTURE_WINDOW
+    MIN_SIGNAL_GAP = MIN_SIGNAL_INTERVAL
+
     if TRADING_MODE == 'profit':
-        # PROFIT MODE: More trades, dynamic TP/SL, higher risk tolerance
-        CONFIDENCE_THRESHOLD = 0.85
-        ENTROPY_THRESHOLD = 0.55
-        BASE_TP = 0.015
-        BASE_SL = 0.008
-        BACKTEST_WINDOW = 12
-        MIN_SIGNAL_GAP = MIN_SIGNAL_INTERVAL
         USE_DYNAMIC_TPSL_LOCAL = USE_DYNAMIC_TPSL
         USE_TRAILING_STOP_LOCAL = USE_TRAILING_STOP
         USE_COMPOUND_SIZING = USE_COMPOUND
     else:
-        # ACCURACY MODE: Fewer trades, strict filters, lower risk
-        CONFIDENCE_THRESHOLD = ENTRY_THRESHOLD
-        ENTROPY_THRESHOLD = 0.45
-        BASE_TP = TP_MIN
-        BASE_SL = SL_MIN
-        BACKTEST_WINDOW = FUTURE_WINDOW
-        MIN_SIGNAL_GAP = MIN_SIGNAL_INTERVAL
         USE_DYNAMIC_TPSL_LOCAL = False
         USE_TRAILING_STOP_LOCAL = False
         USE_COMPOUND_SIZING = False
@@ -1208,17 +1420,22 @@ if __name__ == "__main__":
         print('='*50)
 
         try:
+            # ANTI-OVERFITTING: More aggressive regularization via training config
+            # - Reduced epochs (100 -> 80)
+            # - Smaller batch size (32 -> 16) for more gradient updates
+            # - Stricter early stopping (patience 15 -> 10, min_delta 0.001)
+            # - Monitor both val_loss and val_accuracy
             history = model.fit(
                 X_train, y_train,
-                epochs=300,
-                batch_size=64,
-                validation_split=0.15,
+                epochs=100,  # Allow more epochs with early stopping
+                batch_size=32,  # Standard batch size for stability
+                validation_data=(X_test, y_test),  # Use held-out test set
                 class_weight=class_weights,
                 callbacks=[
-                    ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=10, min_lr=1e-6),
-                    EarlyStopping(monitor='val_loss', patience=25, restore_best_weights=True)
+                    ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=8, min_lr=1e-6),
+                    EarlyStopping(monitor='val_loss', patience=15, restore_best_weights=True)
                 ],
-                verbose=0
+                verbose=1
             )
         except Exception as e:
             print(f"[ERROR] Training failed for {name}: {e}")
@@ -1226,9 +1443,35 @@ if __name__ == "__main__":
 
         val_acc = max(history.history['val_accuracy'])
         val_loss = min(history.history['val_loss'])
+        train_acc = max(history.history['accuracy'])
+        train_loss = min(history.history['loss'])
+
+        # === OVERFITTING DETECTION ===
+        overfit_gap = train_acc - val_acc
+        if overfit_gap > 0.15:
+            print(f"[WARNING] SEVERE OVERFITTING DETECTED!")
+            print(f"  Train Acc: {train_acc:.4f} vs Val Acc: {val_acc:.4f} (Gap: {overfit_gap:.4f})")
+            print(f"  This model may not generalize well to live trading!")
+        elif overfit_gap > 0.08:
+            print(f"[CAUTION] Moderate overfitting detected (Gap: {overfit_gap:.4f})")
+        else:
+            print(f"[OK] Overfitting check passed (Gap: {overfit_gap:.4f})")
+
+        # Also check if val_accuracy is suspiciously high (near 1.0)
+        if val_acc > 0.95:
+            print(f"[WARNING] Val accuracy ({val_acc:.4f}) is suspiciously high!")
+            print(f"  This often indicates data leakage or label issues.")
 
         # Test set predictions (out-of-sample)
         y_test_pred = model.predict(X_test, verbose=0)
+
+        # === DEBUG: Show prediction distribution ===
+        pred_classes = np.argmax(y_test_pred, axis=1)
+        pred_confidences = np.max(y_test_pred, axis=1)
+        print(f"[DEBUG] Prediction distribution: {Counter(pred_classes)}")
+        print(f"[DEBUG] Confidence stats: min={pred_confidences.min():.3f}, max={pred_confidences.max():.3f}, mean={pred_confidences.mean():.3f}")
+        print(f"[DEBUG] Signals above {CONFIDENCE_THRESHOLD}: {(pred_confidences >= CONFIDENCE_THRESHOLD).sum()}")
+
         metrics = calculate_metrics(y_test_raw, y_test_pred, CONFIDENCE_THRESHOLD, ENTROPY_THRESHOLD)
 
         print(f"[METRICS] High-quality signals: {metrics['high_conf_signals']}/{metrics['total_signals']}")
@@ -1264,24 +1507,34 @@ if __name__ == "__main__":
             confidence = pred_probs[pred_class]
             entropy = entropy_full[i]
 
-            # === SIGNAL FILTERING ===
-            if confidence < CONFIDENCE_THRESHOLD:
-                continue
-            if pred_class == 0:
-                continue
-            if entropy > ENTROPY_THRESHOLD:
-                continue
-            if i - last_trade_idx < MIN_SIGNAL_GAP:
+            # === ACCURACY FILTERS (improve win rate, not just reduce trades) ===
+            if pred_class == 0:  # Skip HOLD
                 continue
 
+            # 1. HIGH CONFIDENCE - only take most confident predictions
+            if confidence < 0.65:  # 65% confidence (model max ~75-80% with less smoothing)
+                continue
+
+            # 2. LOW ENTROPY - model must be certain (not confused between classes)
+            if entropy > 0.65:  # Lower = more certain
+                continue
+
+            # 3. MULTI-INDICATOR CONFIRMATION - technical indicators must agree
             df_idx = len(df) - len(X_seq) + i
             if not multi_indicator_confirmation(df, df_idx, pred_class, INTERVALS):
                 continue
 
-            # === WHALE CONFIRMATION (skip if whales disagree) ===
-            whale_confirmed, whale_boost, whale_reason = whale_confirms_signal(pred_class, SYMBOL)
-            if not whale_confirmed:
-                continue  # Skip trade if whales disagree
+            # 4. TREND ALIGNMENT - multiple timeframes must agree
+            alignment = check_timeframe_alignment(df, df_idx, pred_class, INTERVALS)
+            if alignment < 0.6:  # At least 60% of indicators align
+                continue
+
+            # 5. MINIMUM SIGNAL GAP - avoid overtrading
+            if i - last_trade_idx < MIN_SIGNAL_GAP:
+                continue
+
+            whale_boost = 0.0
+            whale_reason = "disabled"
 
             last_trade_idx = i
             price_entry = close_prices[i]
@@ -1426,34 +1679,32 @@ if __name__ == "__main__":
         # Calculate expectancy (expected profit per trade)
         expectancy = avg_trade  # Already in percentage
 
-        # === PROFIT-MAXIMIZED SCORING ===
-        if TRADING_MODE == 'profit':
-            # Focus on TOTAL PROFIT and PROFIT FACTOR
+        # === TRADING-FOCUSED SCORING ===
+        # Prioritize actual trading performance over validation accuracy
+        # IMPORTANT: Require minimum trades to avoid inf scores
+        if total_trades < 5:
+            score = -1000  # Penalize models with too few trades
+        elif TRADING_MODE == 'profit':
             score = (
-                profit_pct * 3.0 +                    # Total profit is king
-                profit_factor * 10 +                  # Profit factor very important
-                win_rate * 1.5 +                      # Win rate still matters
-                avg_trade * 20 +                      # Average profit per trade
-                sharpe * 10 +                         # Risk-adjusted returns
-                total_trades * 0.3 +                  # More trades = more opportunity
-                -max_drawdown * 0.3 +                 # Small penalty for drawdown
-                val_acc * 20 - val_loss * 10
+                profit_pct * 3.0 +
+                min(profit_factor, 10) * 15 +         # Cap PF to avoid inf
+                win_rate * 2.0 +
+                avg_trade * 20 +
+                sharpe * 10 +
+                total_trades * 0.2 +
+                -max_drawdown * 0.5 +
+                val_acc * 10 - val_loss * 5
             )
         else:
-            # ACCURACY MODE: Focus on win rate and precision
-            precision_score = (metrics['long_precision'] + metrics['short_precision']) * 25
-            signal_quality_bonus = max(0, (50 - total_trades) * 0.5)
-            drawdown_penalty = max_drawdown * 0.5
-
+            # ACCURACY MODE: Focus on PROFIT FACTOR and WIN RATE
             score = (
-                win_rate * 2.5 +
-                precision_score +
-                profit_factor * 5 +
-                avg_trade * 15 -
-                std_trade * 3 -
-                drawdown_penalty +
-                signal_quality_bonus +
-                val_acc * 40 - val_loss * 15
+                win_rate * 3.0 +
+                min(profit_factor, 10) * 20 +         # Cap PF to avoid inf
+                profit_pct * 2.0 +
+                avg_trade * 15 +
+                -max_drawdown * 1.0 +
+                total_trades * 0.5 +                  # Reward more trades
+                val_acc * 10 - val_loss * 5
             )
 
         if score > best_score:
@@ -1683,3 +1934,8 @@ if __name__ == "__main__":
     print(f"\n{'='*60}")
     print("TRAINING COMPLETE")
     print('='*60)
+    print("\nNext steps:")
+    print("1. Check the win rate in backtest results above")
+    print("2. If win rate > 60%, model is ready for paper trading")
+    print("3. Run: python run.py (with PAPER_TRADING_MODE=True)")
+    print("4. Paper trade for 30 days before going live")

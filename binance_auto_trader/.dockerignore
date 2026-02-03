@@ -1,0 +1,37 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+.venv
+venv
+env
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+
+# Logs and cache
+*.log
+*.cache
+news_history_cache.json
+
+# Config with secrets (will be mounted)
+config.py
+
+# Models (will be mounted or built)
+*.keras
+*.pkl
+*.h5
+
+# Documentation
+*.md
+LICENSE

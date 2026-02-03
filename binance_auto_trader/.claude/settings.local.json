@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "Bash(python:*)",
+      "Bash(pip install:*)",
+      "Bash(docker build:*)",
+      "Bash(powershell -ExecutionPolicy Bypass -File \"D:\\\\Project\\\\AI\\\\binance_auto_trader\\\\setup_service.ps1\":*)",
+      "Bash(copy \"D:\\\\Project\\\\AI\\\\binance_auto_trader\\\\start_trader_hidden.vbs\" \"%APPDATA%\\\\Microsoft\\\\Windows\\\\Start Menu\\\\Programs\\\\Startup\\\\binance_trader.vbs\")",
+      "Bash(powershell -Command:*)"
+    ]
+  }
+}

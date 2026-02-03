@@ -93,16 +93,16 @@ if TRADING_MODE == 'profit':
     MIN_SIGNAL_INTERVAL = 2        # Allow more frequent trading
     MAX_DAILY_TRADES = 10          # More trades allowed
 else:
-    # === ACCURACY MODE SETTINGS (Conservative, high win rate) ===
-    DEFAULT_LEVERAGE = 3
-    RISK_PERCENT = 10
+    # === ACCURACY MODE SETTINGS (High win rate + safe profit) ===
+    DEFAULT_LEVERAGE = 3           # Safe leverage
+    RISK_PERCENT = 10              # Safe risk per trade
     SWITCH_THRESHOLD = 0.95
     ENTRY_THRESHOLD = 0.92
-    USE_DYNAMIC_TPSL = False
-    USE_TRAILING_STOP = False
-    USE_COMPOUND = False
-    MIN_SIGNAL_INTERVAL = 3
-    MAX_DAILY_TRADES = 5
+    USE_DYNAMIC_TPSL = False       # Fixed TP/SL = more consistent wins
+    USE_TRAILING_STOP = False      # Disabled = higher win rate
+    USE_COMPOUND = True            # Compounding for growth
+    MIN_SIGNAL_INTERVAL = 1        # 1 hour between trades
+    MAX_DAILY_TRADES = 10          # Allow more trades per day
 
 # TP/SL based on BTC/USDT historical analysis (Binance data)
 # BTC ATR: 5m=0.19%, 15m=0.39%, 1h=0.91%

@@ -29,8 +29,12 @@ PAPER_TRADING_MIN_PROFIT = 0.0         # Must be profitable (>0%)
 PAPER_TRADING_MAX_DRAWDOWN = 0.30      # Max 30% drawdown allowed
 
 # File paths
-PAPER_TRADE_LOG = "paper_trades.json"
-PAPER_TRADING_STATUS = "paper_trading_status.json"
+# Data directory for status files (mounted outside Docker)
+DATA_DIR = os.environ.get('DATA_DIR', 'data')
+os.makedirs(DATA_DIR, exist_ok=True)
+
+PAPER_TRADE_LOG = os.path.join(DATA_DIR, "paper_trades.json")
+PAPER_TRADING_STATUS = os.path.join(DATA_DIR, "paper_trading_status.json")
 
 # ============================================================
 # PAPER TRADING TRACKER
@@ -97,6 +101,40 @@ class PaperTradingTracker:
         }
         with open(PAPER_TRADE_LOG, 'w') as f:
             json.dump(data, f, indent=2, default=str)
+
+    def save_signal_status(self, signal, price, confidence, tp_price, sl_price, leverage):
+        """Save current signal and balance to status file for external monitoring."""
+        wins = len([t for t in self.trades if t.get('pnl', 0) > 0])
+        losses = len([t for t in self.trades if t.get('pnl', 0) <= 0])
+        total_trades = wins + losses
+        win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
+
+        status = {
+            'timestamp': datetime.now().isoformat(),
+            'signal': signal,
+            'price': price,
+            'confidence': confidence,
+            'tp_price': tp_price,
+            'sl_price': sl_price,
+            'leverage': leverage,
+            'capital': self.capital,
+            'start_capital': self.starting_capital,
+            'pnl': self.capital - self.starting_capital,
+            'pnl_percent': ((self.capital - self.starting_capital) / self.starting_capital) * 100,
+            'total_trades': total_trades,
+            'wins': wins,
+            'losses': losses,
+            'win_rate': win_rate,
+            'open_position': self.open_position,
+            'peak_capital': self.peak_capital,
+            'max_drawdown': ((self.peak_capital - self.capital) / self.peak_capital * 100) if self.peak_capital > 0 else 0,
+            'days_trading': (datetime.now() - self.start_date).days if self.start_date else 0
+        }
+
+        with open(PAPER_TRADING_STATUS, 'w') as f:
+            json.dump(status, f, indent=2, default=str)
+
+        print(f"[STATUS] Saved to {PAPER_TRADING_STATUS}")
 
     def start_paper_trading(self):
         """Initialize paper trading period."""
@@ -367,8 +405,8 @@ def run_paper_trading():
 
     while True:
         try:
-            # Fetch features
-            df = fetch_features_multi_timeframe()
+            # Fetch features (cached for speed)
+            df = fetch_features_multi_timeframe(use_cache=True)
             price = get_realtime_price(SYMBOL)
 
             if not price:
@@ -430,7 +468,29 @@ def run_paper_trading():
 
             else:
                 # No open position - look for entry
-                print(f"[{timestamp}] Signal: {action} | Conf: {confidence:.2f} | Price: ${price:.2f}")
+                # Calculate TP/SL prices for display
+                if action == 'LONG':
+                    tp_price = price * (1 + TP_RATIO)
+                    sl_price = price * (1 - SL_RATIO)
+                elif action == 'SHORT':
+                    tp_price = price * (1 - TP_RATIO)
+                    sl_price = price * (1 + SL_RATIO)
+                else:
+                    tp_price = sl_price = price
+
+                potential_profit = tracker.capital * RISK_PERCENT / 100 * leverage * TP_RATIO
+                potential_loss = tracker.capital * RISK_PERCENT / 100 * leverage * SL_RATIO
+
+                current_pos = tracker.open_position['side'] if tracker.open_position else "NONE"
+                print(f"\n[{timestamp}] === SIGNAL: {action} ===")
+                print(f"  Entry:  ${price:.2f}")
+                print(f"  TP:     ${tp_price:.2f} (+{TP_RATIO*100:.2f}%) -> +${potential_profit:.2f}")
+                print(f"  SL:     ${sl_price:.2f} (-{SL_RATIO*100:.2f}%) -> -${potential_loss:.2f}")
+                print(f"  Conf:   {confidence:.2f} | Leverage: {leverage}x | Capital: ${tracker.capital:.2f}")
+                print(f"  Position: {current_pos}")
+
+                # Save signal status for external monitoring
+                tracker.save_signal_status(action, price, confidence, tp_price, sl_price, leverage)
 
                 if action != 'HOLD' and confidence >= ENTRY_THRESHOLD_CURRENT:
                     qty = (tracker.capital * RISK_PERCENT / 100 * leverage) / price
@@ -446,7 +506,13 @@ def run_paper_trading():
         except Exception as e:
             print(f"[PAPER] Error: {e}")
 
-        time.sleep(60)  # Check every minute
+        # Sleep based on candle interval
+        INTERVAL_SLEEP = {
+            '1m': 60, '5m': 180, '15m': 300,
+            '30m': 600, '1h': 900, '4h': 1800, '1d': 3600
+        }
+        sleep_time = INTERVAL_SLEEP.get(INTERVALS[0], 300)
+        time.sleep(sleep_time)
 
     # Final status
     tracker.print_status()

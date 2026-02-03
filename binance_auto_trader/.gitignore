@@ -1,0 +1,121 @@
+# ============================================================
+# Binance Auto Trader - .gitignore
+# ============================================================
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# === Virtual Environment ===
+.venv/
+venv/
+ENV/
+env/
+.env
+
+# === Model Files (Large binaries) ===
+*.keras
+*.h5
+*.pkl
+*.joblib
+*.model
+*.weights
+checkpoint/
+models/
+
+# === Sensitive Data ===
+# IMPORTANT: Never commit API keys!
+# config.py contains API keys - use config.example.py as template
+# Uncomment below if you want to ignore config.py:
+# config.py
+
+# === Trade Logs (Contains sensitive trading data) ===
+trade_log.json
+paper_trades.json
+paper_trading_status.json
+performance_log.json
+model_history.json
+training_config.pkl
+ensemble_config.pkl
+
+# === Log Files ===
+*.log
+logs/
+trading.log
+error.log
+
+# === Temporary Files ===
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+.cache/
+tmp/
+temp/
+
+# === IDE / Editor ===
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+.spyderproject
+.spyproject
+.ropeproject
+
+# === Jupyter Notebook ===
+.ipynb_checkpoints/
+*.ipynb
+
+# === OS Files ===
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# === Lock Files ===
+retrain.lock
+*.lock
+
+# === Backup Files ===
+*.bak
+*.backup
+model_backup_*.keras
+
+# === Test Output ===
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# === Data Files (if storing locally) ===
+data/
+*.csv
+*.parquet
+
+# === Scaler Files ===
+scaler.pkl
+scaler_new.pkl

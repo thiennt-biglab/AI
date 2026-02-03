@@ -23,7 +23,33 @@ from strategy_lstm_live import (
 import time
 import numpy as np
 import uuid
+import json
+import os
 from datetime import datetime
+
+# Data directory for status files (mounted outside Docker)
+DATA_DIR = os.environ.get('DATA_DIR', 'data')
+os.makedirs(DATA_DIR, exist_ok=True)
+
+SIGNAL_STATUS_FILE = os.path.join(DATA_DIR, "signal_status.json")
+
+def save_signal_status(signal, price, confidence, tp_price, sl_price, leverage, balance, position):
+    """Save current signal and balance to status file for external monitoring."""
+    status = {
+        'timestamp': datetime.now().isoformat(),
+        'signal': signal,
+        'price': price,
+        'confidence': confidence,
+        'tp_price': tp_price,
+        'sl_price': sl_price,
+        'leverage': leverage,
+        'balance': balance,
+        'position': position,
+        'mode': 'LIVE'
+    }
+    with open(SIGNAL_STATUS_FILE, 'w') as f:
+        json.dump(status, f, indent=2)
+    log(f"[STATUS] Saved to {SIGNAL_STATUS_FILE}")
 
 # Import continuous learning system
 try:
@@ -138,7 +164,7 @@ last_switch_time = 0
 
 while True:
     try:
-        df = fetch_features_multi_timeframe()
+        df = fetch_features_multi_timeframe(use_cache=True)  # Use cache for live trading
         scaled_input = preprocess_for_lstm(df)
 
         price = get_realtime_price(SYMBOL)
@@ -149,8 +175,12 @@ while True:
 
         action, confidence = lstm_based_action(df)
 
-        ema_fast = df['ema_10m'].iloc[-1] if 'ema_10m' in df.columns else None
-        ema_slow = df['ema_50m'].iloc[-1] if 'ema_50m' in df.columns else None
+        # Use dynamic EMA columns based on primary timeframe
+        primary_tf = INTERVALS[0]
+        ema_fast_col = f'ema_9_{primary_tf}'
+        ema_slow_col = f'ema_20_{primary_tf}'
+        ema_fast = df[ema_fast_col].iloc[-1] if ema_fast_col in df.columns else None
+        ema_slow = df[ema_slow_col].iloc[-1] if ema_slow_col in df.columns else None
         trend = 'UP' if ema_fast and ema_slow and ema_fast > ema_slow else 'DOWN'
 
         base_range = avg_atr / price
@@ -231,7 +261,29 @@ while True:
                 log(f"[FILTER] Đang lỗ → chỉ đánh theo trend mạnh, bỏ lệnh ngược")
                 continue
 
-        log(f"[INFO] Action: {action} | Confidence: {confidence:.2f} | Price: {price:.4f}")
+        # Calculate TP/SL prices for display
+        if action == 'LONG':
+            tp_price = price * (1 + TAKE_PROFIT_RATIO)
+            sl_price = price * (1 - LOSS_CUTOFF_RATIO)
+        elif action == 'SHORT':
+            tp_price = price * (1 - TAKE_PROFIT_RATIO)
+            sl_price = price * (1 + LOSS_CUTOFF_RATIO)
+        else:
+            tp_price = sl_price = price
+
+        potential_profit = balance * RISK_PERCENT / 100 * leverage * TAKE_PROFIT_RATIO
+        potential_loss = balance * RISK_PERCENT / 100 * leverage * LOSS_CUTOFF_RATIO
+
+        current_pos = current_position if current_position else "NONE"
+        log(f"\n=== SIGNAL: {action} ===")
+        log(f"  Entry:  ${price:.2f}")
+        log(f"  TP:     ${tp_price:.2f} (+{TAKE_PROFIT_RATIO*100:.2f}%) -> +${potential_profit:.2f}")
+        log(f"  SL:     ${sl_price:.2f} (-{LOSS_CUTOFF_RATIO*100:.2f}%) -> -${potential_loss:.2f}")
+        log(f"  Conf:   {confidence:.2f} | Leverage: {leverage}x | Balance: ${balance:.2f}")
+        log(f"  Position: {current_pos}")
+
+        # Save signal status for external monitoring
+        save_signal_status(action, price, confidence, tp_price, sl_price, leverage, balance, current_pos)
 
         BREAKOUT_MARGIN_PERCENT = 0.01
         breakout_margin = price * BREAKOUT_MARGIN_PERCENT
@@ -373,4 +425,15 @@ while True:
     except Exception as e:
         log(f"[ERROR] {e}")
 
-    time.sleep(60)
+    # Sleep based on candle interval (no need to check every minute for 1h candles)
+    INTERVAL_SLEEP = {
+        '1m': 60,      # 1 minute
+        '5m': 180,     # 3 minutes
+        '15m': 300,    # 5 minutes
+        '30m': 600,    # 10 minutes
+        '1h': 900,     # 15 minutes
+        '4h': 1800,    # 30 minutes
+        '1d': 3600,    # 1 hour
+    }
+    sleep_time = INTERVAL_SLEEP.get(INTERVALS[0], 300)
+    time.sleep(sleep_time)

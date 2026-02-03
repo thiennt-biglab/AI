@@ -3,8 +3,16 @@ import pandas as pd
 import ta
 import requests
 import numpy as np
+import warnings
 from config import API_KEY, API_SECRET, SYMBOL, INTERVALS
 from trader import safe_api_call
+
+# Suppress ta library division warnings (harmless, occurs in early candles)
+warnings.filterwarnings('ignore', category=RuntimeWarning, module='ta')
+
+# === DATA FETCHING CONFIG ===
+# Limited by whale data from Binance API (~30 days)
+HISTORICAL_CANDLES_LIMIT = 2300  # Aligned with whale data limit
 
 # Import historical news proxy for training
 try:
@@ -14,22 +22,91 @@ except ImportError:
     HAS_NEWS_PROXY = False
     print("[WARN] historical_news_proxy not available")
 
-# Import whale tracker for smart money features
+# Import real historical news (1 month from NewsAPI)
+# DISABLED: Using full price history without news dependency
+HAS_HISTORICAL_NEWS = False  # Disabled for full history training
+NEWS_FEATURE_NAMES = []
+
+# Import historical whale data for training
 try:
-    from whale_tracker import (
-        get_top_trader_long_short_ratio,
-        get_top_trader_account_ratio,
-        get_global_long_short_ratio,
-        get_open_interest_history,
-        get_order_book_imbalance,
-        WhaleTracker
-    )
-    HAS_WHALE_TRACKER = True
+    from historical_whale import get_historical_whale_features, WHALE_FEATURE_NAMES
+    HAS_HISTORICAL_WHALE = True
+    print("[INFO] Historical whale data available for training")
 except ImportError:
-    HAS_WHALE_TRACKER = False
-    print("[WARN] whale_tracker not available")
+    HAS_HISTORICAL_WHALE = False
+    WHALE_FEATURE_NAMES = []
+    print("[WARN] historical_whale not available")
 
 client = Client(API_KEY, API_SECRET)
+
+# === CANDLE CACHE - Reduces API calls by ~98% ===
+_candle_cache = {}  # {interval: {'data': [...], 'last_update': timestamp}}
+CACHE_UPDATE_CANDLES = 50  # Only fetch last 50 candles on update
+
+
+def fetch_klines_cached(symbol, interval, total_limit=2300):
+    """
+    Fetch candles with caching. First call fetches full data,
+    subsequent calls only fetch latest candles and merge.
+    """
+    global _candle_cache
+    cache_key = f"{symbol}_{interval}"
+
+    # Check if we have cached data
+    if cache_key in _candle_cache and _candle_cache[cache_key]['data']:
+        cached = _candle_cache[cache_key]['data']
+
+        # Fetch only latest candles
+        new_klines = safe_api_call(
+            client.futures_klines,
+            symbol=symbol,
+            interval=interval,
+            limit=CACHE_UPDATE_CANDLES
+        )
+
+        if new_klines:
+            # Get timestamps for merging
+            cached_times = {k[0] for k in cached}
+
+            # Add new candles that aren't in cache
+            for kline in new_klines:
+                if kline[0] not in cached_times:
+                    cached.append(kline)
+                else:
+                    # Update existing candle (in case it's the current one)
+                    for i, c in enumerate(cached):
+                        if c[0] == kline[0]:
+                            cached[i] = kline
+                            break
+
+            # Sort by timestamp and keep only latest total_limit
+            cached.sort(key=lambda x: x[0])
+            cached = cached[-total_limit:]
+
+            _candle_cache[cache_key]['data'] = cached
+            print(f"[CACHE] Updated {interval}: +{len(new_klines)} candles, total {len(cached)}")
+
+        return cached
+
+    else:
+        # First call - fetch full data
+        print(f"[CACHE] Initial fetch {interval}: {total_limit} candles...")
+        all_klines = fetch_full_klines(symbol, interval, total_limit)
+
+        _candle_cache[cache_key] = {
+            'data': all_klines,
+            'last_update': None
+        }
+
+        return all_klines
+
+
+def clear_candle_cache():
+    """Clear the candle cache (useful for training)."""
+    global _candle_cache
+    _candle_cache = {}
+    print("[CACHE] Cleared")
+
 
 def fetch_full_klines(symbol, interval, total_limit=50000):
     all_klines = []
@@ -77,11 +154,20 @@ def get_funding_rate(symbol="PEOPLEUSDT"):
     except:
         return 0.0
 
-def fetch_features_multi_timeframe():
+def fetch_features_multi_timeframe(use_cache=True):
+    """
+    Fetch features from multiple timeframes.
+    use_cache=True: Use cached data for live trading (fast, low API calls)
+    use_cache=False: Fetch full data for training
+    """
     all_dfs = []
 
     for interval in INTERVALS:
-        klines = fetch_full_klines(SYMBOL, interval, total_limit=50000)
+        if use_cache:
+            klines = fetch_klines_cached(SYMBOL, interval, total_limit=HISTORICAL_CANDLES_LIMIT)
+        else:
+            print(f"[INFO] Fetching {HISTORICAL_CANDLES_LIMIT} candles for {interval}...")
+            klines = fetch_full_klines(SYMBOL, interval, total_limit=HISTORICAL_CANDLES_LIMIT)
 
         if not klines or len(klines) < 1000:
             print(f"[ERROR] Klines for {interval} is too short or empty.")
@@ -247,6 +333,87 @@ def fetch_features_multi_timeframe():
     if combined.empty:
         raise ValueError("[CRITICAL] Combined DataFrame is empty after concat and dropna.")
 
+    # === REAL HISTORICAL NEWS (1 month from NewsAPI) ===
+    # Store timestamp for proper alignment
+    primary_tf = INTERVALS[0]
+
+    if HAS_HISTORICAL_NEWS:
+        try:
+            print("[INFO] Fetching real historical news (1 month)...")
+            news_features = get_historical_news_features(days_back=30, use_cache=True)
+
+            if not news_features.empty:
+                # Initialize all news features with neutral values
+                for feat in NEWS_FEATURE_NAMES:
+                    combined[feat] = 0.0
+
+                # Get the timestamp from the first dataframe (before we dropped it)
+                # We need to recreate timestamps based on candle count
+                # For 15m candles, each row is 15 minutes apart
+                interval_minutes = {'1m': 1, '5m': 5, '15m': 15, '30m': 30, '1h': 60, '4h': 240, '1d': 1440}
+                minutes = interval_minutes.get(primary_tf, 60)
+
+                # Create timestamps for combined df (assuming data ends at "now")
+                from datetime import datetime, timedelta
+                end_time = datetime.utcnow().replace(minute=(datetime.utcnow().minute // minutes) * minutes, second=0, microsecond=0)
+                timestamps = [end_time - timedelta(minutes=minutes * i) for i in range(len(combined))]
+                timestamps = timestamps[::-1]  # Reverse to oldest first
+                combined['_timestamp'] = timestamps
+
+                # Convert news index to comparable format
+                news_features = news_features.reset_index()
+                news_features['timestamp'] = pd.to_datetime(news_features['timestamp']).dt.floor('H')
+
+                # Create hour column for merging
+                combined['_hour'] = pd.to_datetime(combined['_timestamp']).dt.floor('H')
+
+                # Merge news features by hour (no lag)
+                news_features = news_features.set_index('timestamp')
+
+                aligned_count = 0
+                for idx, row in combined.iterrows():
+                    hour = row['_hour']
+                    if hour in news_features.index:
+                        for feat in NEWS_FEATURE_NAMES:
+                            if feat in news_features.columns:
+                                combined.at[idx, feat] = news_features.loc[hour, feat]
+                        aligned_count += 1
+
+                # Clean up temp columns
+                combined.drop(['_timestamp', '_hour'], axis=1, inplace=True)
+
+                print(f"[INFO] Aligned {aligned_count} candles with news data (by timestamp)")
+            else:
+                print("[INFO] No historical news data, using neutral values")
+                for feat in NEWS_FEATURE_NAMES:
+                    combined[feat] = 0.0
+
+        except Exception as e:
+            print(f"[WARN] Failed to load historical news: {e}")
+            import traceback
+            traceback.print_exc()
+            for feat in NEWS_FEATURE_NAMES:
+                combined[feat] = 0.0
+    else:
+        # Add placeholder news features (all 17 features)
+        combined["news_sentiment_mean"] = 0.0
+        combined["news_sentiment_std"] = 0.0
+        combined["news_count"] = 0
+        combined["news_fed_mentions"] = 0
+        combined["news_inflation_mentions"] = 0
+        combined["news_war_mentions"] = 0
+        combined["news_china_mentions"] = 0
+        combined["news_gold_mentions"] = 0
+        combined["news_oil_mentions"] = 0
+        combined["news_crisis_mentions"] = 0
+        combined["news_bullish_mentions"] = 0
+        combined["news_bearish_mentions"] = 0
+        combined["news_regulation_mentions"] = 0
+        combined["news_geopolitical_risk"] = 0.0
+        combined["news_safe_haven"] = 0.0
+        combined["news_crypto_score"] = 0.0
+        combined["news_score"] = 0.0
+
     # === HISTORICAL NEWS PROXY FEATURES (for training) ===
     # These features learn from price action patterns that typically occur around news events
     if HAS_NEWS_PROXY:
@@ -295,84 +462,77 @@ def fetch_features_multi_timeframe():
         combined['btc_dominance'] = 0.0
         combined['funding_rate'] = 0.0
 
-    # === WHALE/SMART MONEY FEATURES (for higher win rate) ===
-    if HAS_WHALE_TRACKER:
+    # === HISTORICAL WHALE/SMART MONEY FEATURES ===
+    if HAS_HISTORICAL_WHALE:
         try:
-            print("[INFO] Adding whale/smart money features...")
+            print("[INFO] Fetching historical whale data...")
 
-            # Get current whale data
-            top_position = get_top_trader_long_short_ratio(SYMBOL)
-            top_account = get_top_trader_account_ratio(SYMBOL)
-            global_ratio = get_global_long_short_ratio(SYMBOL)
-            oi_data = get_open_interest_history(SYMBOL)
-            order_book = get_order_book_imbalance(SYMBOL)
+            # Determine period based on interval
+            interval_to_period = {'1m': '5m', '5m': '5m', '15m': '15m', '30m': '30m', '1h': '1h', '4h': '4h', '1d': '1d'}
+            period = interval_to_period.get(primary_tf, '1h')
 
-            # Add whale features to dataframe
-            # Top trader position ratio (smart money direction)
-            combined['whale_top_position_ratio'] = top_position['long_short_ratio']
-            combined['whale_top_account_ratio'] = top_account['long_short_ratio']
+            # Fetch historical whale data
+            whale_features = get_historical_whale_features(SYMBOL, period=period, limit=len(combined) + 100)
 
-            # Retail sentiment (contrarian indicator)
-            combined['whale_retail_ratio'] = global_ratio['long_short_ratio']
-            # Contrarian score: when retail is very long, smart money often shorts
-            retail_ratio = global_ratio['long_short_ratio']
-            combined['whale_contrarian_score'] = np.where(
-                retail_ratio > 1.5, -1.0,  # Retail very long -> bearish signal
-                np.where(retail_ratio < 0.67, 1.0, 0.0)  # Retail very short -> bullish signal
-            )
+            if not whale_features.empty:
+                # Initialize whale features with neutral values
+                for feat in WHALE_FEATURE_NAMES:
+                    combined[feat] = 0.0
 
-            # Open interest features
-            combined['whale_oi_change'] = oi_data['oi_change_5'] / 10  # Normalized
-            combined['whale_oi_trend'] = 1.0 if oi_data['oi_trend'] == 'UP' else (
-                -1.0 if oi_data['oi_trend'] == 'DOWN' else 0.0
-            )
+                # Create timestamps for combined df
+                interval_minutes = {'1m': 1, '5m': 5, '15m': 15, '30m': 30, '1h': 60, '4h': 240, '1d': 1440}
+                minutes = interval_minutes.get(primary_tf, 60)
 
-            # Order book imbalance
-            combined['whale_orderbook_imbalance'] = order_book['imbalance']
+                from datetime import datetime, timedelta
+                end_time = datetime.utcnow().replace(minute=(datetime.utcnow().minute // minutes) * minutes, second=0, microsecond=0)
+                timestamps = [end_time - timedelta(minutes=minutes * i) for i in range(len(combined))]
+                timestamps = timestamps[::-1]
+                combined['_timestamp'] = timestamps
 
-            # Combined whale score (-1 to +1)
-            whale_score = 0.0
-            if top_position['long_short_ratio'] > 1.1:
-                whale_score += 0.3
-            elif top_position['long_short_ratio'] < 0.9:
-                whale_score -= 0.3
+                # Round to period for matching
+                period_minutes = {'5m': 5, '15m': 15, '30m': 30, '1h': 60, '4h': 240, '1d': 1440}
+                period_min = period_minutes.get(period, 60)
+                combined['_period'] = pd.to_datetime(combined['_timestamp']).dt.floor(f'{period_min}T')
 
-            if retail_ratio > 1.5:  # Contrarian
-                whale_score -= 0.2
-            elif retail_ratio < 0.67:
-                whale_score += 0.2
+                # Align whale features by timestamp
+                whale_features = whale_features.reset_index()
+                whale_features['timestamp'] = pd.to_datetime(whale_features['timestamp']).dt.floor(f'{period_min}T')
+                whale_features = whale_features.set_index('timestamp')
 
-            if order_book['imbalance'] > 0.1:
-                whale_score += 0.2
-            elif order_book['imbalance'] < -0.1:
-                whale_score -= 0.2
+                aligned_count = 0
+                for idx, row in combined.iterrows():
+                    period_time = row['_period']
+                    if period_time in whale_features.index:
+                        for feat in WHALE_FEATURE_NAMES:
+                            if feat in whale_features.columns:
+                                combined.at[idx, feat] = whale_features.loc[period_time, feat]
+                        aligned_count += 1
 
-            combined['whale_combined_score'] = whale_score
+                # Clean up temp columns
+                combined.drop(['_timestamp', '_period'], axis=1, inplace=True)
 
-            print(f"[INFO] Added 8 whale features. Current whale score: {whale_score:.2f}")
+                print(f"[INFO] Aligned {aligned_count} candles with whale data (by timestamp)")
+            else:
+                print("[INFO] No historical whale data, using neutral values")
+                for feat in WHALE_FEATURE_NAMES:
+                    combined[feat] = 0.0
 
         except Exception as e:
-            print(f"[WARN] Failed to create whale features: {e}")
-            # Add placeholder features
-            combined['whale_top_position_ratio'] = 1.0
-            combined['whale_top_account_ratio'] = 1.0
-            combined['whale_retail_ratio'] = 1.0
-            combined['whale_contrarian_score'] = 0.0
-            combined['whale_oi_change'] = 0.0
-            combined['whale_oi_trend'] = 0.0
-            combined['whale_orderbook_imbalance'] = 0.0
-            combined['whale_combined_score'] = 0.0
+            print(f"[WARN] Failed to load historical whale data: {e}")
+            import traceback
+            traceback.print_exc()
+            for feat in WHALE_FEATURE_NAMES:
+                combined[feat] = 0.0
     else:
         # Fallback: add placeholder whale features
-        print("[INFO] Adding placeholder whale features (tracker not available)")
-        combined['whale_top_position_ratio'] = 1.0
-        combined['whale_top_account_ratio'] = 1.0
-        combined['whale_retail_ratio'] = 1.0
-        combined['whale_contrarian_score'] = 0.0
-        combined['whale_oi_change'] = 0.0
-        combined['whale_oi_trend'] = 0.0
-        combined['whale_orderbook_imbalance'] = 0.0
-        combined['whale_combined_score'] = 0.0
+        print("[INFO] Adding placeholder whale features (historical data not available)")
+        placeholder_features = [
+            "whale_retail_long_ratio", "whale_top_position_ratio", "whale_top_account_ratio",
+            "whale_open_interest", "whale_taker_buy_ratio", "whale_contrarian_score",
+            "whale_oi_change", "whale_combined_score"
+        ]
+        for feat in placeholder_features:
+            combined[feat] = 0.0
 
     # Clean up any NaN values
     combined.replace([np.inf, -np.inf], np.nan, inplace=True)
