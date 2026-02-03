@@ -22,16 +22,72 @@ from strategy_lstm_live import (
 )
 import time
 import numpy as np
+import uuid
 from datetime import datetime
+
+# Import continuous learning system
+try:
+    from continuous_learning import (
+        get_manager as get_cl_manager,
+        log_entry as cl_log_entry,
+        log_exit as cl_log_exit,
+        start_monitoring as cl_start_monitoring
+    )
+    HAS_CONTINUOUS_LEARNING = USE_CONTINUOUS_LEARNING
+    print("[INFO] Continuous learning system loaded")
+except ImportError as e:
+    HAS_CONTINUOUS_LEARNING = False
+    print(f"[WARN] Continuous learning not available: {e}")
 
 PARTIAL_TP_1_DONE = False
 PARTIAL_TP_2_DONE = False
 
+# Track active trade for continuous learning
+ACTIVE_TRADE_ID = None
+ACTIVE_TRADE_ENTRY_PRICE = None
+
 def log(msg):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
 
+def generate_trade_id():
+    """Generate unique trade ID."""
+    return f"trade_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+
+def log_trade_entry(symbol, side, entry_price, qty, confidence):
+    """Log trade entry for continuous learning."""
+    global ACTIVE_TRADE_ID, ACTIVE_TRADE_ENTRY_PRICE
+    if HAS_CONTINUOUS_LEARNING:
+        trade_id = generate_trade_id()
+        cl_log_entry(
+            trade_id=trade_id,
+            symbol=symbol,
+            side=side,
+            entry_price=entry_price,
+            qty=qty,
+            confidence=confidence,
+            model_version=BEST_MODEL_PATH
+        )
+        ACTIVE_TRADE_ID = trade_id
+        ACTIVE_TRADE_ENTRY_PRICE = entry_price
+        return trade_id
+    return None
+
+def log_trade_exit(exit_price, exit_reason='UNKNOWN'):
+    """Log trade exit for continuous learning."""
+    global ACTIVE_TRADE_ID, ACTIVE_TRADE_ENTRY_PRICE
+    if HAS_CONTINUOUS_LEARNING and ACTIVE_TRADE_ID:
+        cl_log_exit(ACTIVE_TRADE_ID, exit_price, exit_reason)
+        ACTIVE_TRADE_ID = None
+        ACTIVE_TRADE_ENTRY_PRICE = None
+
 def handle_close_position(reason, symbol, position, profit_ratio, reset_peak=True, reset_partial=True, wait_after=60):
     log(f"[CLOSE] Reason: {reason} | PnL: {profit_ratio*100:.2f}%")
+
+    # Log exit for continuous learning
+    current_price = get_realtime_price(symbol)
+    if current_price:
+        log_trade_exit(current_price, reason)
+
     close_position(symbol, position)
     if reset_peak:
         close_position.peak_profit = 0
@@ -42,6 +98,40 @@ def handle_close_position(reason, symbol, position, profit_ratio, reset_peak=Tru
     time.sleep(wait_after)
 
 log("[START] Running Binance Futures Auto-Trader with LSTM Strategy")
+
+# ============================================================
+# PAPER TRADING CHECK - Must complete before live trading!
+# ============================================================
+try:
+    from config import PAPER_TRADING_MODE
+    from paper_trading import is_live_trading_allowed, run_paper_trading
+
+    if PAPER_TRADING_MODE:
+        log("[PAPER] Paper trading mode is ENABLED")
+        log("[PAPER] Running in simulation mode (no real money)")
+        log("[PAPER] Complete 30 days of paper trading to unlock live trading")
+        run_paper_trading()
+        exit(0)  # Exit after paper trading
+    else:
+        # Check if paper trading was completed
+        if not is_live_trading_allowed():
+            log("[ERROR] Paper trading not completed!")
+            log("[ERROR] You must complete 30 days of paper trading first.")
+            log("[ERROR] Set PAPER_TRADING_MODE = True in config.py")
+            log("[ERROR] Then run: python run.py")
+            exit(1)
+        else:
+            log("[LIVE] Paper trading completed. Live trading enabled.")
+except ImportError:
+    log("[WARN] Paper trading module not found, proceeding with live trading")
+
+# Start continuous learning monitoring in background
+if HAS_CONTINUOUS_LEARNING:
+    log("[CL] Starting continuous learning monitoring...")
+    cl_start_monitoring()
+    cl_manager = get_cl_manager()
+    cl_manager.print_status()
+
 consecutive_losses = 0
 ENTRY_THRESHOLD_BASE = ENTRY_THRESHOLD
 last_switch_time = 0
@@ -234,12 +324,20 @@ while True:
                         continue
 
             if current_position == 'LONG' and action == 'SHORT' and confidence >= SWITCH_THRESHOLD:
-                log(f"[AUTO-CLOSE] Closing LONG → SHORT @ {confidence:.2f}")
+                log(f"[AUTO-CLOSE] Closing LONG -> SHORT @ {confidence:.2f}")
+                # Log exit before closing
+                current_price = get_realtime_price(SYMBOL)
+                if current_price:
+                    log_trade_exit(current_price, 'SWITCH_TO_SHORT')
                 close_position(SYMBOL, 'LONG')
                 last_switch_time = time.time()
                 action_to_take = 'SHORT'
             elif current_position == 'SHORT' and action == 'LONG' and confidence >= SWITCH_THRESHOLD:
-                log(f"[AUTO-CLOSE] Closing SHORT → LONG @ {confidence:.2f}")
+                log(f"[AUTO-CLOSE] Closing SHORT -> LONG @ {confidence:.2f}")
+                # Log exit before closing
+                current_price = get_realtime_price(SYMBOL)
+                if current_price:
+                    log_trade_exit(current_price, 'SWITCH_TO_LONG')
                 close_position(SYMBOL, 'SHORT')
                 last_switch_time = time.time()
                 action_to_take = 'LONG'
@@ -257,8 +355,13 @@ while True:
 
                 order, entry_price = place_market_order(SYMBOL, action_to_take, qty, leverage)
                 if not entry_price:
-                    log("[ERROR] Không lấy được entry price sau khi đặt lệnh!")
+                    log("[ERROR] Khong lay duoc entry price sau khi dat lenh!")
                     continue
+
+                # Log trade entry for continuous learning
+                trade_id = log_trade_entry(SYMBOL, action_to_take, entry_price, qty, confidence)
+                if trade_id:
+                    log(f"[CL] Trade logged: {trade_id}")
 
                 sl, tp = place_sl_tp_order(SYMBOL, action_to_take, qty, entry_price, TAKE_PROFIT_RATIO, LOSS_CUTOFF_RATIO)
                 log(f"[TRADE] {action_to_take} {qty} {SYMBOL} @ {entry_price:.4f} | Confidence: {confidence:.2f} | Leverage: {leverage}x | TP: {tp} | SL: {sl}")
